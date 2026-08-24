@@ -12,6 +12,7 @@ ECHO verbindet freies textbasiertes Rollenspiel mit einem persistenten Welt- und
 - persistente Ereignis- und Zustandslogik statt isolierter Chat-Antworten
 - klar getrennte Ebenen für Kanon, Regeln, Spielstand und offene Fragen
 - Google-Sheets-basierter State Store mit Inbox-/Commit-Workflow
+- optionaler Fast Turn Gateway für weniger Roundtrips im interaktiven Spiel
 - eigenes responsives Lese-Overlay für Szenen, Beziehungen, Inventar und offene Fäden
 - Browser-Sprachausgabe für automatisch vorgelesene Szenen
 - dauerhafte Konsequenzen und Beziehungen statt einfacher Gut-/Böse-Punkte
@@ -23,7 +24,7 @@ Spieler schreibt Handlung in ChatGPT
                 ↓
 Kanon + Regeln + aktueller Spielstand prüfen
                 ↓
-TURN_INBOX: neuer Spielzug als PENDING
+Fast Turn Gateway / TURN_INBOX: neuer Spielzug als PENDING
                 ↓
 Apps-Script-Verarbeitung / Validierung
                 ↓
@@ -56,17 +57,19 @@ Die Demo unter `demo/` enthält ausschließlich Foundation-Inhalte und ist ausdr
 | Ebene | Aufgabe |
 | --- | --- |
 | ChatGPT | Spielleitung, Regelprüfung und Erzeugung eines strukturierten Spielzugs |
+| Fast Turn Gateway | kompakter Runtime-Read und atomare, idempotente Inbox-Übergabe |
 | TURN_INBOX | sichere Übergabe neuer Aktionen als `PENDING` |
 | Apps Script | Verarbeitung, Validierung und Commit in die persistenten Tabellen |
 | State Store | Kanon, Regeln, Events, State, Beziehungen, Threads und Scene Feed |
 | Overlay | schreibgeschützte Darstellung des aktuellen Spielzustands |
 | SpeechSynthesis | optionale lokale Sprachausgabe der Szene im Browser |
 
-Mehr dazu: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+Mehr dazu: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) und [`docs/FAST-TURN-GATEWAY.md`](docs/FAST-TURN-GATEWAY.md)
 
 ## Repository-Struktur
 
 ```text
+apps-script/          öffentliche, secret-freie Apps-Script-Bausteine
 demo/                 öffentliche Foundation-Demo des Overlays
 docs/                 Architektur, Datenvertrag und Datenschutzgrenze
 examples/              anonymisierte Beispiel-Payloads
