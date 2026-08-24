@@ -1,0 +1,6 @@
+# Example only — never commit real values.
+ECHO_SPREADSHEET_ID=<private-live-spreadsheet-id>
+ECHO_API_KEY=<private-api-key>
+ECHO_GATEWAY_TOKEN=<private-gateway-token>
+# Optional:
+# ECHO_RUNTIME_KEYS_JSON=["save.last_event_id","world_location_id"]
