@@ -1,0 +1,20 @@
+# Private / local configuration
+.env
+.env.*
+*.secret
+*.secrets
+credentials.json
+service-account*.json
+
+# Local exports and live state
+private/
+exports/
+live-state/
+*.xlsx
+*.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
