@@ -9,7 +9,8 @@ Dieser Ordner enthält den öffentlichen, secret-freien Apps-Script-Code der Liv
 - `OverlayState.gs` – read-only Projektion des aktuellen Zustands für das Overlay
 - `SheetStore.gs` – Google-Sheets-Zugriff, Tabellen-/JSON-Helfer und API-Key-Prüfung
 - `FastTurnGateway.gs` – kompakter Runtime-Read und atomare `PENDING`-Übergabe
-- `FastTurnGatewayWebApp.example.gs` – nur Referenz für Projekte ohne eigenen `doPost()`
+
+Der alternative standalone-`doPost()` für Projekte ohne eigenen Handler liegt bewusst unter `examples/FastTurnGatewayWebApp.example.gs` und **nicht** in diesem deploybaren Ordner.
 
 Apps Script behandelt alle `.gs`-Dateien eines Projekts als gemeinsamen globalen Codebereich. Die Aufteilung dient deshalb nur Wartbarkeit und Versionskontrolle.
 
