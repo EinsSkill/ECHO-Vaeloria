@@ -1,9 +1,8 @@
 // ECHO – Fast Turn Gateway
 // Public, secret-free reference implementation.
-// Live spreadsheet IDs, deployment URLs and tokens belong in Script Properties,
-// never in this repository.
+// Live spreadsheet IDs, deployment URLs and tokens belong in Script Properties.
 
-const ECHO_FAST_GATEWAY_VERSION = '1.0.0';
+const ECHO_FAST_GATEWAY_VERSION = '1.0.1';
 
 const ECHO_FAST_DEFAULT_RUNTIME_KEYS = [
   'save.last_event_id',
@@ -29,24 +28,17 @@ const ECHO_FAST_DEFAULT_RUNTIME_KEYS = [
   'world.elapsed_minutes'
 ];
 
-/**
- * Returns the compact canonical runtime state needed before resolving a turn.
- * Duplicate STATE_SNAPSHOT keys are resolved with newest-row-wins semantics.
- */
+/** Compact canonical context for resolving the next player turn. */
 function echoGetRuntimeContext() {
   const ss = echoFastSpreadsheet_();
   const inbox = echoFastRequireSheet_(ss, 'TURN_INBOX');
   const snapshot = echoFastRequireSheet_(ss, 'STATE_SNAPSHOT');
-
   const lastTurn = echoFastReadLatestInboxRow_(inbox);
   const state = echoFastReadSnapshotMap_(snapshot);
-  const keys = echoFastRuntimeKeys_();
-  const compactState = {};
+  const compact = {};
 
-  keys.forEach(function (key) {
-    if (Object.prototype.hasOwnProperty.call(state, key)) {
-      compactState[key] = state[key];
-    }
+  echoFastRuntimeKeys_().forEach(function (key) {
+    if (Object.prototype.hasOwnProperty.call(state, key)) compact[key] = state[key];
   });
 
   return {
@@ -54,25 +46,14 @@ function echoGetRuntimeContext() {
     version: ECHO_FAST_GATEWAY_VERSION,
     commit_ready: !lastTurn || lastTurn.validation_status === 'COMMITTED',
     last_turn: lastTurn,
-    snapshot: compactState
+    snapshot: compact
   };
 }
 
 /**
- * Atomically appends one PENDING turn to TURN_INBOX.
- *
- * Expected payload:
- * {
- *   turn_id,
- *   chat_id,
- *   received_at,
- *   raw_input,
- *   parsed_intent_json: object|string,
- *   validation_status: 'PENDING'
- * }
- *
- * Idempotent by turn_id: a repeated request returns the existing row instead
- * of creating a second turn.
+ * Atomically appends one new PENDING turn to TURN_INBOX.
+ * Idempotent by turn_id and refuses a dependent turn while the latest turn
+ * is not COMMITTED.
  */
 function echoSubmitTurn(turn) {
   const normalized = echoFastNormalizeTurn_(turn);
@@ -83,6 +64,7 @@ function echoSubmitTurn(turn) {
     const ss = echoFastSpreadsheet_();
     const inbox = echoFastRequireSheet_(ss, 'TURN_INBOX');
 
+    // Idempotent retry: return the already-existing turn instead of duplicating it.
     const existingRow = echoFastFindTurnRow_(inbox, normalized.turn_id);
     if (existingRow) {
       const existing = echoFastReadInboxRow_(inbox, existingRow);
@@ -95,11 +77,28 @@ function echoSubmitTurn(turn) {
       };
     }
 
+    // ECHO sequencing rule: never create a dependent turn until the latest
+    // inbox entry has been committed successfully.
+    const latest = echoFastReadLatestInboxRow_(inbox);
+    if (latest && latest.validation_status !== 'COMMITTED') {
+      let code = 'PREVIOUS_TURN_NOT_COMMITTED';
+      if (latest.validation_status === 'PENDING') code = 'PREVIOUS_TURN_PENDING';
+      if (latest.validation_status === 'ERROR') code = 'PREVIOUS_TURN_ERROR';
+
+      return {
+        ok: false,
+        accepted: false,
+        duplicate: false,
+        error: code,
+        last_turn: latest
+      };
+    }
+
     const lastRow = inbox.getLastRow();
     const targetRow = Math.max(2, lastRow + 1);
     const target = inbox.getRange(targetRow, 1, 1, 10);
 
-    // Preserve visual structure only. Never copy prior commit/status content.
+    // Preserve only formatting. Never copy stale commit fields from G:J.
     if (lastRow >= 2) {
       inbox
         .getRange(lastRow, 1, 1, 10)
@@ -121,17 +120,14 @@ function echoSubmitTurn(turn) {
 
     SpreadsheetApp.flush();
 
-    // The processor may commit very quickly. PENDING, COMMITTED and ERROR all
-    // prove that the row was accepted by TURN_INBOX; ERROR is surfaced below.
+    // Processor may already have changed PENDING to COMMITTED/ERROR.
     const written = echoFastReadInboxRow_(inbox, targetRow);
     const acceptedStatuses = ['PENDING', 'COMMITTED', 'ERROR'];
     const verified =
       written.turn_id === normalized.turn_id &&
       acceptedStatuses.indexOf(written.validation_status) !== -1;
 
-    if (!verified) {
-      throw new Error('TURN_INBOX verification failed after write.');
-    }
+    if (!verified) throw new Error('TURN_INBOX verification failed after write.');
 
     return {
       ok: written.validation_status !== 'ERROR',
@@ -145,11 +141,10 @@ function echoSubmitTurn(turn) {
   }
 }
 
-/** Returns one existing TURN_INBOX status without scanning unrelated columns. */
+/** Targeted status read for an already-submitted turn. */
 function echoGetTurnStatus(turnId) {
   const id = echoFastRequiredString_(turnId, 'turn_id');
-  const ss = echoFastSpreadsheet_();
-  const inbox = echoFastRequireSheet_(ss, 'TURN_INBOX');
+  const inbox = echoFastRequireSheet_(echoFastSpreadsheet_(), 'TURN_INBOX');
   const row = echoFastFindTurnRow_(inbox, id);
 
   return row
@@ -157,99 +152,76 @@ function echoGetTurnStatus(turnId) {
     : { ok: true, found: false, turn_id: id };
 }
 
-/**
- * Request router for an optional Web App or future custom connector.
- * Keep the token in Script Properties under ECHO_GATEWAY_TOKEN.
- */
+/** Router for an optional Web App or future custom connector. */
 function echoHandleGatewayRequest(request) {
   const body = request || {};
   echoFastAssertGatewayToken_(body.token);
 
   switch (body.op) {
-    case 'context':
-      return echoGetRuntimeContext();
-    case 'submit':
-      return echoSubmitTurn(body.turn);
-    case 'status':
-      return echoGetTurnStatus(body.turn_id);
-    default:
-      throw new Error('Unsupported gateway operation.');
+    case 'context': return echoGetRuntimeContext();
+    case 'submit': return echoSubmitTurn(body.turn);
+    case 'status': return echoGetTurnStatus(body.turn_id);
+    default: throw new Error('Unsupported gateway operation.');
   }
 }
 
 function echoFastSpreadsheet_() {
-  const props = PropertiesService.getScriptProperties();
-  const configuredId = String(props.getProperty('ECHO_SPREADSHEET_ID') || '').trim();
+  const id = String(
+    PropertiesService.getScriptProperties().getProperty('ECHO_SPREADSHEET_ID') || ''
+  ).trim();
 
-  if (configuredId) {
-    return SpreadsheetApp.openById(configuredId);
-  }
+  if (id) return SpreadsheetApp.openById(id);
 
   const active = SpreadsheetApp.getActiveSpreadsheet();
-  if (active) {
-    return active;
-  }
+  if (active) return active;
 
   throw new Error(
-    'No spreadsheet configured. Bind the script to the ECHO sheet or set ECHO_SPREADSHEET_ID in Script Properties.'
+    'No spreadsheet configured. Bind the script to the ECHO sheet or set ECHO_SPREADSHEET_ID.'
   );
 }
 
 function echoFastRequireSheet_(ss, name) {
   const sheet = ss.getSheetByName(name);
-  if (!sheet) {
-    throw new Error('Required sheet missing: ' + name);
-  }
+  if (!sheet) throw new Error('Required sheet missing: ' + name);
   return sheet;
 }
 
 function echoFastReadLatestInboxRow_(sheet) {
-  const lastRow = sheet.getLastRow();
-  return lastRow >= 2 ? echoFastReadInboxRow_(sheet, lastRow) : null;
+  const row = sheet.getLastRow();
+  return row >= 2 ? echoFastReadInboxRow_(sheet, row) : null;
 }
 
 function echoFastReadInboxRow_(sheet, row) {
-  const values = sheet.getRange(row, 1, 1, 10).getValues()[0];
+  const v = sheet.getRange(row, 1, 1, 10).getValues()[0];
   let parsed = null;
 
-  if (values[4]) {
-    try {
-      parsed = typeof values[4] === 'string' ? JSON.parse(values[4]) : values[4];
-    } catch (err) {
-      parsed = null;
-    }
+  if (v[4]) {
+    try { parsed = typeof v[4] === 'string' ? JSON.parse(v[4]) : v[4]; }
+    catch (err) { parsed = null; }
   }
 
   return {
-    turn_id: echoFastJsonValue_(values[0]),
-    chat_id: echoFastJsonValue_(values[1]),
-    received_at: echoFastJsonValue_(values[2]),
-    validation_status: echoFastJsonValue_(values[5]),
-    commit_event_id: echoFastJsonValue_(values[6]),
-    ui_feed_id: echoFastJsonValue_(values[7]),
-    error_code: echoFastJsonValue_(values[8]),
-    processed_at: echoFastJsonValue_(values[9]),
+    turn_id: echoFastJsonValue_(v[0]),
+    chat_id: echoFastJsonValue_(v[1]),
+    received_at: echoFastJsonValue_(v[2]),
+    validation_status: echoFastJsonValue_(v[5]),
+    commit_event_id: echoFastJsonValue_(v[6]),
+    ui_feed_id: echoFastJsonValue_(v[7]),
+    error_code: echoFastJsonValue_(v[8]),
+    processed_at: echoFastJsonValue_(v[9]),
     event_id: parsed && parsed.event_id ? parsed.event_id : null,
-    scene_feed_id:
-      parsed && parsed.scene && parsed.scene.feed_id ? parsed.scene.feed_id : null
+    scene_feed_id: parsed && parsed.scene && parsed.scene.feed_id ? parsed.scene.feed_id : null
   };
 }
 
 function echoFastReadSnapshotMap_(sheet) {
   const lastRow = sheet.getLastRow();
   const out = {};
+  if (lastRow < 2) return out;
 
-  if (lastRow < 2) {
-    return out;
-  }
-
-  const rows = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
-  rows.forEach(function (row) {
+  sheet.getRange(2, 1, lastRow - 1, 2).getValues().forEach(function (row) {
     const key = String(row[0] || '').trim();
-    if (key) {
-      // Later rows overwrite earlier duplicates by design.
-      out[key] = echoFastJsonValue_(row[1]);
-    }
+    if (key) out[key] = echoFastJsonValue_(row[1]); // newest duplicate wins
   });
 
   return out;
@@ -257,53 +229,40 @@ function echoFastReadSnapshotMap_(sheet) {
 
 function echoFastRuntimeKeys_() {
   const raw = PropertiesService.getScriptProperties().getProperty('ECHO_RUNTIME_KEYS_JSON');
-  if (!raw) {
-    return ECHO_FAST_DEFAULT_RUNTIME_KEYS.slice();
-  }
+  if (!raw) return ECHO_FAST_DEFAULT_RUNTIME_KEYS.slice();
 
   try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || !parsed.length) {
-      throw new Error('not a non-empty array');
-    }
-    return parsed.map(function (value) { return String(value); });
+    const keys = JSON.parse(raw);
+    if (!Array.isArray(keys) || !keys.length) throw new Error('invalid');
+    return keys.map(function (value) { return String(value); });
   } catch (err) {
-    throw new Error('ECHO_RUNTIME_KEYS_JSON must be a JSON array of state keys.');
+    throw new Error('ECHO_RUNTIME_KEYS_JSON must be a non-empty JSON array.');
   }
 }
 
 function echoFastFindTurnRow_(sheet, turnId) {
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) {
-    return 0;
-  }
+  if (lastRow < 2) return 0;
 
-  const match = sheet
+  const found = sheet
     .getRange(2, 1, lastRow - 1, 1)
     .createTextFinder(turnId)
     .matchEntireCell(true)
     .findNext();
 
-  return match ? match.getRow() : 0;
+  return found ? found.getRow() : 0;
 }
 
 function echoFastNormalizeTurn_(turn) {
-  if (!turn || typeof turn !== 'object') {
-    throw new Error('turn must be an object.');
-  }
+  if (!turn || typeof turn !== 'object') throw new Error('turn must be an object.');
 
   const status = String(turn.validation_status || 'PENDING').trim();
-  if (status !== 'PENDING') {
-    throw new Error('New turns must enter TURN_INBOX as PENDING.');
-  }
+  if (status !== 'PENDING') throw new Error('New turns must enter TURN_INBOX as PENDING.');
 
   let parsed = turn.parsed_intent_json;
   if (typeof parsed === 'string') {
-    try {
-      parsed = JSON.parse(parsed);
-    } catch (err) {
-      throw new Error('parsed_intent_json is not valid JSON.');
-    }
+    try { parsed = JSON.parse(parsed); }
+    catch (err) { throw new Error('parsed_intent_json is not valid JSON.'); }
   }
 
   echoFastValidateIntent_(parsed);
@@ -355,11 +314,9 @@ function echoFastValidateIntent_(intent) {
 }
 
 function echoFastRequiredString_(value, field) {
-  const out = String(value == null ? '' : value).trim();
-  if (!out) {
-    throw new Error(field + ' is required.');
-  }
-  return out;
+  const result = String(value == null ? '' : value).trim();
+  if (!result) throw new Error(field + ' is required.');
+  return result;
 }
 
 function echoFastAssertGatewayToken_(suppliedToken) {
@@ -367,9 +324,7 @@ function echoFastAssertGatewayToken_(suppliedToken) {
     PropertiesService.getScriptProperties().getProperty('ECHO_GATEWAY_TOKEN') || ''
   );
 
-  if (!expected) {
-    throw new Error('ECHO_GATEWAY_TOKEN is not configured.');
-  }
+  if (!expected) throw new Error('ECHO_GATEWAY_TOKEN is not configured.');
   if (String(suppliedToken || '') !== expected) {
     throw new Error('Unauthorized gateway request.');
   }
