@@ -1,0 +1,26 @@
+{
+  "turn_id": "TURN-DEMO-001",
+  "chat_id": "ECHO-PROJECT",
+  "received_at": "2026-01-01T12:00:00+01:00",
+  "raw_input": "Ich untersuche die unbekannte Tür.",
+  "parsed_intent_json": {
+    "event_id": "EVT-DEMO-001",
+    "event_type": "PLAYER_ACTION",
+    "player_action": "Ich untersuche die unbekannte Tür.",
+    "narrative_summary": "Die Figur untersucht eine nicht näher definierte Tür.",
+    "scene": {
+      "feed_id": "SCENE-DEMO-001",
+      "scene_type": "narrative",
+      "title": "Demo-Szene",
+      "location_id": "LOC_DEMO",
+      "narrative_text": "Dies ist ausschließlich ein anonymisierter Beispieltext für den öffentlichen Datenvertrag.",
+      "mood": "neutral",
+      "available_actions_json": [],
+      "status": "PLAY"
+    },
+    "state_updates": {},
+    "relationship_updates": {},
+    "new_flags": []
+  },
+  "validation_status": "PENDING"
+}
