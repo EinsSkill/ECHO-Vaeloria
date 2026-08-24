@@ -12,7 +12,8 @@ ECHO verbindet freies textbasiertes Rollenspiel mit einem persistenten Welt- und
 - persistente Ereignis- und Zustandslogik statt isolierter Chat-Antworten
 - klar getrennte Ebenen für Kanon, Regeln, Spielstand und offene Fragen
 - Google-Sheets-basierter State Store mit Inbox-/Commit-Workflow
-- optionaler Fast Turn Gateway für weniger Roundtrips im interaktiven Spiel
+- Fast Turn Gateway für weniger Roundtrips im interaktiven Spiel
+- öffentlicher, modularer Google-Apps-Script-Quellcode
 - eigenes responsives Lese-Overlay für Szenen, Beziehungen, Inventar und offene Fäden
 - Browser-Sprachausgabe für automatisch vorgelesene Szenen
 - dauerhafte Konsequenzen und Beziehungen statt einfacher Gut-/Böse-Punkte
@@ -35,20 +36,29 @@ ECHO-Overlay liest die neue Szene
 optional: automatische Sprachausgabe im Browser
 ```
 
-Der Chat ist die Eingabe. Das Overlay ist die sichtbare Ausgabefläche. Der persistente Spielstand liegt außerhalb des öffentlichen Repositorys.
+Der Chat ist die Eingabe. Das Overlay ist die sichtbare Ausgabefläche. Der persistente Spielstand liegt außerhalb des Repositorys.
 
-## Öffentliche Sicherheitsgrenze
+## Code öffentlich, Zustand privat
 
-Dieses Repository ist eine **Showcase- und Technikfassung** des Projekts. Es enthält bewusst nicht den privaten Live-Spielstand.
+Dieses Repository ist die **öffentliche Codebasis von ECHO**. Die technische Implementierung darf eingesehen, versioniert und weiterentwickelt werden; private Laufzeitdaten werden davon strikt getrennt.
+
+Öffentlich enthalten sind unter anderem:
+
+- Apps-Script-Einstieg und API-Routing
+- TURN_INBOX-/Commit-Processor
+- State- und Overlay-Projektion
+- Fast Turn Gateway
+- technische Architektur und Datenverträge
+- nichtkanonische Demo-Inhalte
 
 Nicht enthalten sind:
 
-- gespeicherte Spielzüge und aktuelle Szenen
+- gespeicherte Live-Spielzüge und aktuelle Szenen
 - vollständiger Kanon mit späteren Enthüllungen
 - persönliche oder private Daten
-- Google-Sheet-IDs und Deployment-URLs
-- API-Schlüssel, Tokens oder Zugangsdaten
-- private Apps-Script-Konfiguration
+- Werte privater Script Properties
+- Google-Sheet-IDs und private Deployment-Informationen
+- API-Schlüssel, Gateway-Tokens oder andere Zugangsdaten
 
 Die Demo unter `demo/` enthält ausschließlich Foundation-Inhalte und ist ausdrücklich **nicht als aktueller Kanon** zu verstehen.
 
@@ -64,17 +74,35 @@ Die Demo unter `demo/` enthält ausschließlich Foundation-Inhalte und ist ausdr
 | Overlay | schreibgeschützte Darstellung des aktuellen Spielzustands |
 | SpeechSynthesis | optionale lokale Sprachausgabe der Szene im Browser |
 
-Mehr dazu: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) und [`docs/FAST-TURN-GATEWAY.md`](docs/FAST-TURN-GATEWAY.md)
+Mehr dazu: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/FAST-TURN-GATEWAY.md`](docs/FAST-TURN-GATEWAY.md) und [`apps-script/README.md`](apps-script/README.md).
 
 ## Repository-Struktur
 
 ```text
-apps-script/          öffentliche, secret-freie Apps-Script-Bausteine
-demo/                 öffentliche Foundation-Demo des Overlays
-docs/                 Architektur, Datenvertrag und Datenschutzgrenze
-examples/              anonymisierte Beispiel-Payloads
-README.md               Projektübersicht
+apps-script/
+  Code.gs                   Web-App-Einstieg und Routing
+  TurnProcessor.gs          Inbox- und Commit-Verarbeitung
+  OverlayState.gs           read-only Overlay-Projektion
+  SheetStore.gs             Sheets-/JSON-Helfer
+  FastTurnGateway.gs        schneller Runtime-/Submit-Pfad
+
+demo/                       öffentliche Foundation-Demo des Overlays
+docs/                       Architektur, Datenvertrag und Datenschutzgrenze
+examples/                   anonymisierte Beispiel-Payloads
+README.md                   Projektübersicht
 ```
+
+## Private Konfiguration
+
+Live-Werte werden ausschließlich in den Script Properties des privaten Apps-Script-Projekts gesetzt:
+
+```text
+ECHO_SPREADSHEET_ID
+ECHO_API_KEY
+ECHO_GATEWAY_TOKEN
+```
+
+Die Werte selbst werden niemals committed.
 
 ## Demo lokal öffnen
 
@@ -93,7 +121,7 @@ Die Demo speichert keinen echten Spielzug und verbindet sich nicht mit dem priva
 
 **Aktiv in Entwicklung – persistenter Foundation-Build im Live-Test**
 
-Der grundlegende Workflow aus freier Chat-Eingabe, strukturierter Übergabe, persistentem Spielstand und separatem Overlay ist bereits im Einsatz. Die öffentliche Fassung dokumentiert Architektur und UI, während laufende Geschichte und private Zustände getrennt bleiben.
+Der grundlegende Workflow aus freier Chat-Eingabe, strukturierter Übergabe, persistentem Spielstand und separatem Overlay ist bereits im Einsatz. Der Quellcode wird öffentlich versioniert, während laufende Geschichte, Secrets und privater State getrennt bleiben.
 
 ## Technologie
 
@@ -102,8 +130,8 @@ Der grundlegende Workflow aus freier Chat-Eingabe, strukturierter Übergabe, per
 - Google Apps Script
 - Google Sheets als persistente Daten- und Ereignisschicht
 - strukturierte JSON-Verträge zwischen Spielleitung und State-Processor
-- GitHub für öffentliche Versionierung und Projektdokumentation
+- GitHub für öffentliche Versionierung der Codebasis
 
 ---
 
-Ein persönliches Dark-Fantasy-RPG als persistentes Softwaresystem – mit freiem Spiel, erinnernder Welt und klarer Trennung zwischen öffentlicher Technik und privater Geschichte.
+Ein persönliches Dark-Fantasy-RPG als persistentes Softwaresystem – mit freiem Spiel, erinnernder Welt und klarer Trennung zwischen öffentlichem Code und privatem Zustand.
