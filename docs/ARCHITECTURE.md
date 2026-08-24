@@ -38,7 +38,27 @@ Typische Zielbereiche sind:
 - `THREADS`
 - `FLAGS`
 
-### 5. Overlay
+### 5. Fast Turn Gateway
+
+Für interaktives Spielen kann ein schmaler Apps-Script-Gateway vor `TURN_INBOX` liegen. Er ändert die Persistenzregeln nicht, sondern bündelt die technischen Roundtrips:
+
+```text
+Runtime Context lesen
+        ↓
+Spielzug erzeugen
+        ↓
+Fast Turn Gateway
+        ↓
+TURN_INBOX · PENDING
+        ↓
+normaler Processing Layer
+```
+
+Der Gateway liefert einen kompakten Runtime-Kontext, schreibt neue Inbox-Zeilen atomar, verhindert doppelte `turn_id`-Einträge und verifiziert die Übergabe. Die nachgelagerten Tabellen bleiben weiterhin ausschließlich Aufgabe des Processors.
+
+Referenz: [`FAST-TURN-GATEWAY.md`](FAST-TURN-GATEWAY.md)
+
+### 6. Overlay
 
 Das Overlay ist schreibgeschützt. Es stellt nur den bereits verarbeiteten Zustand dar, unter anderem:
 
@@ -49,7 +69,7 @@ Das Overlay ist schreibgeschützt. Es stellt nur den bereits verarbeiteten Zusta
 - offene Fäden
 - sichtbare Statusänderungen
 
-### 6. Vorlesen
+### 7. Vorlesen
 
 Die öffentliche Foundation-Demo nutzt die Browser-API `SpeechSynthesis`. Dadurch wird für die Grundfunktion kein externer TTS-Dienst und kein API-Key benötigt.
 
@@ -61,3 +81,4 @@ Die öffentliche Foundation-Demo nutzt die Browser-API `SpeechSynthesis`. Dadurc
 - **Freie Spielerhandlung:** Keine Auswahl erzwingen.
 - **Kanon vor Improvisation:** Unbekanntes bleibt unbekannt, bis es im Spiel bestätigt wird.
 - **Darstellung getrennt von Persistenz:** Das Overlay erfindet keinen Zustand.
+- **Fast Path ohne zweite Wahrheit:** Performance-Optimierungen dürfen die bestehende Inbox-/Commit-Grenze nicht umgehen.
