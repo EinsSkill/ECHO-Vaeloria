@@ -102,7 +102,7 @@ function relationshipToOverlay_(row) {
   var intimacyProfile = parseJson_(row.intimacy_profile_json, {});
   var boundaries = parseJson_(row.boundaries_json, []);
   if (!Array.isArray(boundaries)) boundaries = [];
-  var consentState = String(row.consent_state || intimacyProfile.consent_state || 'UNKNOWN').toUpperCase();
+  var consentState = relationshipConsentState_(row, intimacyProfile);
 
   return {
     id: row.state_id || row.entity_b || 'UNKNOWN_RELATIONSHIP',
@@ -114,19 +114,28 @@ function relationshipToOverlay_(row) {
       { label: 'Verlangen', value: axisValue_(row.desire) },
       { label: 'Respekt', value: axisValue_(row.respect) },
       { label: 'Spannung', value: axisValue_(row.tension) },
+      { label: 'Intimität', value: axisValue_(row.intimacy) },
       { label: 'Angst', value: axisValue_(row.fear) }
     ].filter(function (axis) { return axis.value !== null; }),
     intimacy: {
-      available: consentState !== 'UNKNOWN' || axisValue_(row.tension) !== null || axisValue_(row.desire) !== null,
+      available: consentState !== 'UNKNOWN' || axisValue_(row.tension) !== null || axisValue_(row.desire) !== null || axisValue_(row.intimacy) !== null,
       consentState: consentState,
       consentLabel: consentLabel_(consentState),
-      tension: axisValue_(row.tension),
+      tension: axisValue_(row.tension) !== null ? axisValue_(row.tension) : axisValue_(row.intimacy),
       dominance: axisValue_(row.dominance),
       submission: axisValue_(row.submission),
       boundaries: boundaries,
       phase: row.intimacy_phase || intimacyProfile.phase || ''
     }
   };
+}
+
+function relationshipConsentState_(row, intimacyProfile) {
+  var raw = row.consent_state || row.consent_profile || intimacyProfile.consent_state || 'UNKNOWN';
+  var normalized = String(raw || 'UNKNOWN').toUpperCase();
+  return { UNKNOWN: true, OPEN: true, NEGOTIATED: true, PAUSED: true, REVOKED: true }[normalized]
+    ? normalized
+    : 'UNKNOWN';
 }
 
 function threadToOverlay_(row) {
