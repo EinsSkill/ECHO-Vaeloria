@@ -236,3 +236,23 @@ function ensureHeaders_(sheetName, requiredHeaders) {
   if (!missing.length) return;
   sheet.getRange(1, lastColumn + 1, 1, missing.length).setValues([missing]);
 }
+
+
+function validateRelationshipTargets_(updates) {
+  if (!updates || typeof updates !== 'object') return;
+
+  var sheet = getSheet_(ECHO_CONFIG.sheets.relationships);
+  Object.keys(updates).forEach(function (stateId) {
+    var row = findRow_(sheet, 'state_id', stateId);
+    if (!row || !row.__rowNumber) throw new Error('Unknown relationship state_id: ' + stateId);
+
+    var patch = normalizeRelationshipPatch_(updates[stateId] || {}, stateId);
+    Object.keys(patch).forEach(function (key) {
+      if (!hasHeader_(sheet, key)) throw new Error('Missing relationship column: ' + key);
+    });
+  });
+}
+
+function hasHeader_(sheet, header) {
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].indexOf(header) !== -1;
+}
