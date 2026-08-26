@@ -311,6 +311,9 @@ function echoFastValidateIntent_(intent) {
   if (!Array.isArray(intent.new_flags)) {
     throw new Error('parsed_intent_json.new_flags must be an array.');
   }
+
+  // Keep the fast path and the normal processor on the same contract.
+  validateEventShape_(intent);
 }
 
 function echoFastRequiredString_(value, field) {
