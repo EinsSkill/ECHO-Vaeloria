@@ -46,9 +46,7 @@ function processTurnInbox_() {
 
 function commitTurn_(event, options) {
   options = options || {};
-  if (!event || !event.event_id) throw new Error('event_id is required');
-  if (!event.player_action) throw new Error('player_action is required');
-  if (!event.narrative_summary) throw new Error('narrative_summary is required');
+  validateEventShape_(event);
 
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -75,7 +73,9 @@ function commitTurn_(event, options) {
       canonicality: event.canonicality || 'PLAY',
       source: event.source || 'ECHO_CHATGPT',
       reversible: event.reversible === undefined ? 'TRUE' : String(event.reversible),
-      notes: event.notes || ''
+      notes: event.notes || '',
+      content_rating: event.content_rating || '',
+      intimacy_mode: event.intimacy_mode || ''
     };
     appendObject_(getSheet_(ECHO_CONFIG.sheets.eventLog), eventRow);
 
@@ -97,7 +97,9 @@ function commitTurn_(event, options) {
         portraits_json: jsonString_(event.scene.portraits_json || {}),
         map_delta_json: jsonString_(event.scene.map_delta_json || {}),
         relationship_delta_json: jsonString_(event.scene.relationship_delta_json || {}),
-        status: event.scene.status || 'PLAY'
+        status: event.scene.status || 'PLAY',
+        content_rating: event.scene.content_rating || event.content_rating || '',
+        intimacy_mode: event.scene.intimacy_mode || event.intimacy_mode || ''
       };
       appendObject_(getSheet_(ECHO_CONFIG.sheets.sceneFeed), sceneRow);
     }
