@@ -44,3 +44,16 @@ Der Kernvertrag enthält mindestens:
 ```
 
 Nur tatsächlich eingetretene Änderungen werden gespeichert. Möglichkeiten, Vermutungen und zukünftige Folgen werden nicht als bereits geschehene Fakten committed.
+
+
+## Beziehung und erwachsene Dark-Romance-Dynamik
+
+Beziehungsdaten bleiben getrennt vom sichtbaren Szenentext. Neben klassischen Achsen können private Live-Sheets optional folgende Felder führen:
+
+- `trust`, `desire`, `fear`, `respect`, `tension`, `safety`
+- `dominance`, `submission`
+- `consent_state`: `UNKNOWN`, `OPEN`, `NEGOTIATED`, `PAUSED` oder `REVOKED`
+- `boundaries_json`
+- `intimacy_phase` und `intimacy_profile_json`
+
+Alle numerischen Werte werden auf 0–100 begrenzt. Diese Werte beschreiben die erzählerische Lage; sie ersetzen keine freie Handlung und erzeugen keine Zustimmung. `PAUSED` und `REVOKED` bleiben ausdrücklich mögliche Zustände. Szenen können zusätzlich `content_rating` und `intimacy_mode` als getrennte Metadaten führen. Der sichtbare Text bleibt frei von technischen Daten.
