@@ -30,7 +30,12 @@ function doGet(e) {
     return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0' });
   }
   if (action === 'state') {
-    processTurnInbox_();
+    // A queued turn must not make the read-only overlay unreachable.
+    try {
+      processTurnInbox_();
+    } catch (error) {
+      console.warn('ECHO state refresh skipped: ' + String(error && error.message ? error.message : error));
+    }
     return jsonOutput_(getOverlayState_());
   }
 
@@ -586,7 +591,6 @@ function commitTurn_(event, options) {
     };
     appendObject_(eventLogSheet, eventRow);
 
-    var uiFeedId = '';
     if (event.scene) {
       var sceneRow = {
         feed_id: uiFeedId,
@@ -863,10 +867,11 @@ function mergeConditions_(base, additions, removals, duration, eventId) {
 
 function getOverlayState_() {
   var state = getStateMap_();
-  var sceneRows = readTable_(getSheet_(ECHO_CONFIG.sheets.sceneFeed)).rows;
-  var eventRows = readTable_(getSheet_(ECHO_CONFIG.sheets.eventLog)).rows;
-  var relationshipRows = readTable_(getSheet_(ECHO_CONFIG.sheets.relationships)).rows;
-  var threadRows = readTable_(getSheet_(ECHO_CONFIG.sheets.threads)).rows;
+  var overlayWarnings = [];
+  var sceneRows = readOverlayRows_(ECHO_CONFIG.sheets.sceneFeed, overlayWarnings);
+  var eventRows = readOverlayRows_(ECHO_CONFIG.sheets.eventLog, overlayWarnings);
+  var relationshipRows = readOverlayRows_(ECHO_CONFIG.sheets.relationships, overlayWarnings);
+  var threadRows = readOverlayRows_(ECHO_CONFIG.sheets.threads, overlayWarnings);
 
   var playableScenes = sceneRows.filter(isPlayableScene_);
   var scene = latestBySequence_(playableScenes) || {};
@@ -901,6 +906,7 @@ function getOverlayState_() {
   return {
     source: 'google-apps-script',
     stateModelVersion: '2.1',
+    overlayWarnings: overlayWarnings,
     generated_at: new Date().toISOString(),
     currentScene: currentScene,
     sceneActions: actionsFromScene_(scene.available_actions_json),
@@ -952,6 +958,18 @@ function getOverlayState_() {
     selectedMapRegion: mapRegionIdForLocation_(locationId),
     chapters: chaptersFrom_(state)
   };
+}
+
+function readOverlayRows_(sheetName, warnings) {
+  try {
+    return readTable_(getSheet_(sheetName)).rows;
+  } catch (error) {
+    warnings.push({
+      sheet: sheetName,
+      message: String(error && error.message ? error.message : error)
+    });
+    return [];
+  }
 }
 
 function latestBySequence_(rows) {
