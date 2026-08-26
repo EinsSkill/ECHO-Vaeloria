@@ -22,7 +22,7 @@ function getOverlayState_() {
   var memoryState = localizeMemory_(stateValue_(state, 'player.memory_state') || 'NO_MEMORY');
 
   var currentScene = {
-    chapterLabel: stateValue_(state, 'story.chapter_label') || 'Kapitel unbekannt',
+    chapterLabel: chapterLabel_(state),
     title: scene.title || 'Aktuelle Szene',
     moodTag: localizeMood_(scene.mood || 'unbestimmt'),
     text: scene.narrative_text || 'Noch keine sichtbare Szene im persistenten Spielstand.',
@@ -250,6 +250,7 @@ function locationLabel_(id) {
   return {
     PRISON_CITY: 'Die Gefängnisstadt',
     LOC_VAEL_THARYN_AWAKENING: 'Vael Tharyn · Erwachungskammer',
+    LOC_VAEL_THARYN_HIDDEN_WALL_HOLLOW: 'Vael Tharyn · Verborgene Mauerspalte',
     ASHFEN: 'Aschfenn',
     GRAUKUESTE: 'Graue Küste',
     RUINENWALD: 'Ruinenwald'
@@ -266,9 +267,40 @@ function chaptersFrom_(state) {
   if (stored.length) return stored;
   return [{
     id: stateValue_(state, 'story.chapter_id') || 1,
-    label: stateValue_(state, 'story.chapter_label') || 'Kapitel unbekannt',
+    label: chapterLabel_(state),
     locked: false
   }];
+}
+
+function chapterLabel_(state) {
+  var stored = String(stateValue_(state, 'story.chapter_label') || '').trim();
+  if (stored) return stored;
+
+  var raw = String(stateValue_(state, 'story.chapter_id') || '').trim();
+  if (!raw) return 'Kapitel unbekannt';
+
+  var number = Number(raw);
+  if (isFinite(number) && number > 0 && Math.floor(number) === number) {
+    return 'Kapitel ' + romanNumeral_(number);
+  }
+
+  return raw.indexOf('Kapitel') === 0 ? raw : 'Kapitel ' + raw;
+}
+
+function romanNumeral_(number) {
+  var values = [
+    [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'],
+    [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'],
+    [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']
+  ];
+  var result = '';
+  for (var i = 0; i < values.length; i++) {
+    while (number >= values[i][0]) {
+      result += values[i][1];
+      number -= values[i][0];
+    }
+  }
+  return result;
 }
 
 function conditionName_(value) {
