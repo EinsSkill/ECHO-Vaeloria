@@ -11,7 +11,12 @@ var ECHO_RELATIONSHIP_NUMERIC_FIELDS = {
   tension: true,
   safety: true,
   dominance: true,
-  submission: true
+  submission: true,
+  intimacy: true,
+  power_gap: true,
+  dependence: true,
+  agency: true,
+  resentment: true
 };
 
 var ECHO_CONSENT_STATES = {
@@ -90,6 +95,11 @@ function normalizeRelationshipPatch_(patch, stateId) {
         throw new Error('Unknown consent_state: ' + consent);
       }
       out[key] = consent;
+      return;
+    }
+
+    if (key === 'consent_profile') {
+      out[key] = String(value || '');
       return;
     }
 
