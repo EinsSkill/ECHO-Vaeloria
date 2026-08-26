@@ -227,7 +227,8 @@ function findSceneFeedId_(eventId) {
 function setupEchoSchema() {
   ensureHeaders_(ECHO_CONFIG.sheets.relationships, [
     'respect', 'tension', 'safety', 'dominance', 'submission',
-    'consent_state', 'boundaries_json', 'intimacy_phase', 'intimacy_profile_json'
+    'consent_state', 'boundaries_json', 'intimacy_phase', 'intimacy_profile_json',
+    'teaching'
   ]);
   ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode']);
   ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode']);
