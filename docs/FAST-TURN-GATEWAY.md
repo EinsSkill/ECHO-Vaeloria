@@ -28,7 +28,7 @@ getRuntimeContext()
 
 ## Dateien
 
-- `apps-script/FastTurnGateway.gs` – Kernlogik
+- `apps-script/Code.gs` – konsolidierter Backend-Code einschließlich Fast Turn Gateway
 - `apps-script/FastTurnGatewayWebApp.example.gs` – optionaler `doPost`-Wrapper
 
 ## Kernfunktionen
@@ -68,9 +68,9 @@ Liest gezielt den Status eines bereits eingereichten Zuges.
 
 ## Installation im privaten Live-Projekt
 
-### 1. Kernmodul hinzufügen
+### 1. Standalone-Backend übernehmen
 
-Den Inhalt von `apps-script/FastTurnGateway.gs` als neue Datei in das private ECHO-Apps-Script-Projekt übernehmen.
+Den vollständigen Inhalt von `apps-script/Code.gs` in die `Code.gs` des privaten ECHO-Apps-Script-Projekts übernehmen. Die Datei enthält bereits Einstieg, Turn-Vertrag, Schema-Migration, Processor, Overlay, Sheets-Helfer und Fast Turn Gateway.
 
 Ist das Script direkt an das ECHO-Sheet gebunden, ist keine Spreadsheet-ID im Code nötig.
 

@@ -2,17 +2,11 @@
 
 Dieser Ordner enthält den öffentlichen, secret-freien Apps-Script-Code der Live-Architektur.
 
-## Module
+## Standalone-Backend
 
-- `Code.gs` – Web-App-Einstieg, `doGet`, `doPost`, Trigger und gemeinsame Konfiguration
-- `TurnProcessor.gs` – Verarbeitung von `TURN_INBOX`, Commit in Event-/State-/Scene-Strukturen
-- `OverlayState.gs` – read-only Projektion des aktuellen Zustands für das Overlay
-- `SheetStore.gs` – Google-Sheets-Zugriff, Tabellen-/JSON-Helfer und API-Key-Prüfung
-- `FastTurnGateway.gs` – kompakter Runtime-Read und atomare `PENDING`-Übergabe
+- `Code.gs` – vollständiger Apps-Script-Backend mit Einstieg, Turn-Vertrag, Schema-Migration, Inbox-Processor, Overlay-Projektion, Sheets-Helfern und Fast Turn Gateway
 
-Der alternative standalone-`doPost()` für Projekte ohne eigenen Handler liegt bewusst unter `examples/FastTurnGatewayWebApp.example.gs` und **nicht** in diesem deploybaren Ordner.
-
-Apps Script behandelt alle `.gs`-Dateien eines Projekts als gemeinsamen globalen Codebereich. Die Aufteilung dient deshalb nur Wartbarkeit und Versionskontrolle.
+Die Backend-Logik liegt absichtlich in einer einzigen `.gs`-Datei. Dadurch kann der Inhalt von `Code.gs` vollständig in das private ECHO-Apps-Script-Projekt übernommen werden, ohne dass einzelne Abhängigkeiten fehlen oder doppelte globale Definitionen entstehen.
 
 ## Private Script Properties
 
@@ -57,6 +51,6 @@ Die Trennung lautet damit: **Code öffentlich, Konfiguration und Spielzustand pr
 
 ## Schema-Erweiterung für Beziehungen und Szenen
 
-`setupEchoTrigger()` führt vor der Trigger-Erstellung auch `setupEchoSchema()` aus. Die Migration ergänzt ausschließlich fehlende Spalten für `respect`, `tension`, `safety`, `dominance`, `submission`, `consent_state`, `boundaries_json`, `intimacy_phase`, `intimacy_profile_json`, `content_rating` und `intimacy_mode`. Bestehende Werte werden nicht überschrieben.
+`setupEchoTrigger()` führt vor der Trigger-Erstellung auch `setupEchoSchema()` aus. Die Migration ergänzt ausschließlich fehlende Spalten für `respect`, `tension`, `safety`, `dominance`, `submission`, `consent_state`, `boundaries_json`, `intimacy_phase`, `intimacy_profile_json`, `teaching`, `content_rating` und `intimacy_mode`. Bestehende Werte werden nicht überschrieben.
 
 Die Beziehungsschicht kann damit Vertrauen, Verlangen, Angst, Respekt, Spannung und Sicherheitslage sowie eine freiwillige, pausierbare oder widerrufbare Nähe-Dynamik darstellen. Diese Metadaten sind keine Eingabe und erzeugen keine Zustimmung.

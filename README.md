@@ -13,7 +13,7 @@ ECHO verbindet freies textbasiertes Rollenspiel mit einem persistenten Welt- und
 - klar getrennte Ebenen für Kanon, Regeln, Spielstand und offene Fragen
 - Google-Sheets-basierter State Store mit Inbox-/Commit-Workflow
 - Fast Turn Gateway für weniger Roundtrips im interaktiven Spiel
-- öffentlicher, modularer Google-Apps-Script-Quellcode
+- öffentlicher, eigenständiger Google-Apps-Script-Quellcode
 - eigenes responsives Lese-Overlay für Szenen, Beziehungen, Inventar und offene Fäden
 - Browser-Sprachausgabe für automatisch vorgelesene Szenen
 - dauerhafte Konsequenzen und Beziehungen statt einfacher Gut-/Böse-Punkte
@@ -80,11 +80,7 @@ Mehr dazu: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/FAST-TURN-GATE
 
 ```text
 apps-script/
-  Code.gs                   Web-App-Einstieg und Routing
-  TurnProcessor.gs          Inbox- und Commit-Verarbeitung
-  OverlayState.gs           read-only Overlay-Projektion
-  SheetStore.gs             Sheets-/JSON-Helfer
-  FastTurnGateway.gs        schneller Runtime-/Submit-Pfad
+  Code.gs                   gesamter, eigenständiger Apps-Script-Backend-Code
 
 demo/                       öffentliche Foundation-Demo des Overlays
 docs/                       Architektur, Datenvertrag und Datenschutzgrenze
