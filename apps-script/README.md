@@ -53,3 +53,10 @@ Neue Spielzüge gelangen weiterhin ausschließlich als `PENDING` in `TURN_INBOX`
 - echte Turn-, Event- oder Scene-Payloads aus dem laufenden Spiel
 
 Die Trennung lautet damit: **Code öffentlich, Konfiguration und Spielzustand privat.**
+
+
+## Schema-Erweiterung für Beziehungen und Szenen
+
+`setupEchoTrigger()` führt vor der Trigger-Erstellung auch `setupEchoSchema()` aus. Die Migration ergänzt ausschließlich fehlende Spalten für `respect`, `tension`, `safety`, `dominance`, `submission`, `consent_state`, `boundaries_json`, `intimacy_phase`, `intimacy_profile_json`, `content_rating` und `intimacy_mode`. Bestehende Werte werden nicht überschrieben.
+
+Die Beziehungsschicht kann damit Vertrauen, Verlangen, Angst, Respekt, Spannung und Sicherheitslage sowie eine freiwillige, pausierbare oder widerrufbare Nähe-Dynamik darstellen. Diese Metadaten sind keine Eingabe und erzeugen keine Zustimmung.

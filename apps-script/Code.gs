@@ -51,7 +51,9 @@ function doPost(e) {
       return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0' });
     }
 
-    var result = commitTurn_(body.event || body, { skipInboxAppend: false });
+    // Every external game turn enters TURN_INBOX as PENDING. The processor
+    // remains the only writer for EVENT_LOG, SCENE_FEED and STATE_SNAPSHOT.
+    var result = enqueueTurn_(body.event || body);
     return jsonOutput_(result);
   } catch (error) {
     return jsonOutput_({
@@ -90,6 +92,7 @@ function setupEchoTrigger_() {
 }
 
 function setupEchoTrigger() {
+  setupEchoSchema();
   setupEchoTrigger_();
 }
 
