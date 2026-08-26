@@ -51,13 +51,22 @@ function commitTurn_(event, options) {
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    var existing = findRow_(getSheet_(ECHO_CONFIG.sheets.eventLog), 'event_id', event.event_id);
+    var eventLogSheet = getSheet_(ECHO_CONFIG.sheets.eventLog);
+    var sceneFeedSheet = getSheet_(ECHO_CONFIG.sheets.sceneFeed);
+    validateRelationshipTargets_(event.relationship_updates || {});
+    var uiFeedId = event.scene.feed_id || ('SCENE-' + event.event_id);
+    var existingFeed = findRow_(sceneFeedSheet, 'feed_id', uiFeedId);
+    if (existingFeed && String(existingFeed.event_id || '') !== String(event.event_id)) {
+      throw new Error('feed_id is already bound to another event: ' + uiFeedId);
+    }
+
+    var existing = findRow_(eventLogSheet, 'event_id', event.event_id);
     if (existing) {
       return { ok: true, duplicate: true, event_id: event.event_id, ui_feed_id: findSceneFeedId_(event.event_id) };
     }
 
     var now = new Date();
-    var sequence = nextSequence_(getSheet_(ECHO_CONFIG.sheets.eventLog), 'sequence');
+    var sequence = nextSequence_(eventLogSheet, 'sequence');
     var eventRow = {
       event_id: event.event_id,
       run_id: event.run_id || 'PROTO-SAVE-001',
@@ -77,11 +86,10 @@ function commitTurn_(event, options) {
       content_rating: event.content_rating || '',
       intimacy_mode: event.intimacy_mode || ''
     };
-    appendObject_(getSheet_(ECHO_CONFIG.sheets.eventLog), eventRow);
+    appendObject_(eventLogSheet, eventRow);
 
     var uiFeedId = '';
     if (event.scene) {
-      uiFeedId = event.scene.feed_id || ('SCENE-' + event.event_id);
       var sceneRow = {
         feed_id: uiFeedId,
         run_id: event.scene.run_id || event.run_id || 'PROTO-SAVE-001',
@@ -101,7 +109,7 @@ function commitTurn_(event, options) {
         content_rating: event.scene.content_rating || event.content_rating || '',
         intimacy_mode: event.scene.intimacy_mode || event.intimacy_mode || ''
       };
-      appendObject_(getSheet_(ECHO_CONFIG.sheets.sceneFeed), sceneRow);
+      appendObject_(sceneFeedSheet, sceneRow);
     }
 
     applyStateUpdates_(event.state_updates || {}, event.event_id, now);
@@ -227,6 +235,7 @@ function applyRelationshipUpdates_(updates, eventId, now) {
     var patch = normalizeRelationshipPatch_(updates[stateId] || {}, stateId);
     Object.keys(patch).forEach(function(key) {
       if (key === 'state_id') return;
+      if (!hasHeader_(sheet, key)) throw new Error('Missing relationship column: ' + key);
       setCellByHeader_(sheet, row.__rowNumber, key, patch[key]);
     });
     setCellByHeader_(sheet, row.__rowNumber, 'last_event_id', eventId);
