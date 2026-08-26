@@ -880,6 +880,7 @@ function getOverlayState_() {
   var conditions = parseList_(stateValue_(state, 'player.conditions'), []);
   var echoMastery = echoMasteryValue_(stateValue_(state, 'player.echo_mastery_profile'));
   var memoryState = localizeMemory_(stateValue_(state, 'player.memory_state') || 'NO_MEMORY');
+  var currentLocation = locationLabel_(locationId);
 
   var currentScene = {
     chapterLabel: chapterLabel_(state),
@@ -888,12 +889,14 @@ function getOverlayState_() {
     text: scene.narrative_text || 'Noch keine sichtbare Szene im persistenten Spielstand.',
     sceneType: scene.scene_type || 'narrative',
     contentRating: scene.content_rating || '',
-    intimacyMode: scene.intimacy_mode || ''
+    intimacyMode: scene.intimacy_mode || '',
+    location: currentLocation,
+    locationLabel: currentLocation,
+    locationId: locationId
   };
 
   var conditionNames = conditions.map(conditionName_).filter(function (name) { return !!name; });
   var currentHealth = health === '' ? null : Number(health);
-  var currentLocation = locationLabel_(locationId);
 
   return {
     source: 'google-apps-script',
@@ -906,8 +909,17 @@ function getOverlayState_() {
     lastEventId: latestEvent ? latestEvent.event_id : '',
     lastFeedId: scene.feed_id || '',
     echoMastery: echoMastery,
+    // Compatibility aliases for existing overlay clients. The readable label
+    // is exposed separately from the canonical location ID.
+    location: currentLocation,
+    locationLabel: currentLocation,
+    locationId: locationId,
     player: {
       name: stateValue_(state, 'player.name') || 'Namenlos',
+      location: currentLocation,
+      locationLabel: currentLocation,
+      locationName: currentLocation,
+      locationId: locationId,
       species: stateValue_(state, 'player.species') || 'unbekannt',
       tags: playerTags_(state, echoMastery),
       health: currentHealth,
@@ -924,6 +936,9 @@ function getOverlayState_() {
     stateSummary: {
       memory: memoryState,
       location: currentLocation,
+      locationLabel: currentLocation,
+      locationName: currentLocation,
+      locationId: locationId,
       condition: currentHealth === null
         ? 'unbestimmt'
         : (currentHealth <= 0 ? 'bewusstlos' : (conditionNames.length ? conditionNames.join(' · ') : 'lebensfähig')),
