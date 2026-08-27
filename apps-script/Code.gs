@@ -106,11 +106,11 @@ function doGet(e) {
     return jsonOutput_(echoGetChatDeliveryPolicy());
   }
   if (action === 'preferences') {
-    return jsonOutput_(echoGetPreferenceContext_({ includeAudit: true }));
+    return jsonOutput_(getEchoPreferenceContext_({ includeAudit: true }));
   }
   if (action === 'context') {
     requireApiKey_(e && e.parameter ? e.parameter.token : '');
-    return jsonOutput_(echoGetAuthoritativeContext_({ includePrivate: true }));
+    return jsonOutput_(getEchoAuthoritativeContext_({ includePrivate: true }));
   }
   if (action === 'validate-preferences') {
     return jsonOutput_(echoValidatePreferenceProfile());
