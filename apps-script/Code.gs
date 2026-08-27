@@ -35,6 +35,7 @@ var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
 var ECHO_SCENE_CONTRACT_VERSION = '1.0.0';
 var ECHO_RESOLUTION_CONTRACT_VERSION = '1.0.0';
+var ECHO_OVERLAY_CONTRACT_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -102,7 +103,7 @@ var ECHO_AUTHORITY_ORDER_ = [
 ];
 
 var ECHO_CHAT_DELIVERY_POLICY = {
-  version: '1.0.0',
+  version: '1.1.0',
   mode: 'OVERLAY_ONLY',
   chat_response_mode: 'ACK_ONLY',
   narrative_destination: 'SCENE_FEED',
@@ -112,7 +113,10 @@ var ECHO_CHAT_DELIVERY_POLICY = {
   completion_rule: 'ACK_ONLY_AFTER_COMMIT_AND_READBACK',
   processing_mode: 'THOROUGH_PERSISTENCE_AND_CONSISTENCY_CHECK',
   preferred_quality_window: '2–3 Minuten interne Prüfung, sofern der Zug es erfordert',
-  include_narrative_in_chat: false
+  include_narrative_in_chat: false,
+  readback_endpoint: 'gateway.status',
+  success_acknowledgement_requires: ['COMMITTED', 'ui_feed_id'],
+  narrative_readback: 'OVERLAY_ONLY'
 };
 
 function echoChatDeliveryPolicy_() {
@@ -127,7 +131,10 @@ function echoChatDeliveryPolicy_() {
     completion_rule: ECHO_CHAT_DELIVERY_POLICY.completion_rule,
     processing_mode: ECHO_CHAT_DELIVERY_POLICY.processing_mode,
     preferred_quality_window: ECHO_CHAT_DELIVERY_POLICY.preferred_quality_window,
-    include_narrative_in_chat: ECHO_CHAT_DELIVERY_POLICY.include_narrative_in_chat
+    include_narrative_in_chat: ECHO_CHAT_DELIVERY_POLICY.include_narrative_in_chat,
+    readback_endpoint: ECHO_CHAT_DELIVERY_POLICY.readback_endpoint,
+    success_acknowledgement_requires: ECHO_CHAT_DELIVERY_POLICY.success_acknowledgement_requires.slice(),
+    narrative_readback: ECHO_CHAT_DELIVERY_POLICY.narrative_readback
   };
 }
 
@@ -146,6 +153,9 @@ function doGet(e) {
   }
   if (action === 'resolution-contract') {
     return jsonOutput_(echoGetResolutionContract());
+  }
+  if (action === 'overlay-contract') {
+    return jsonOutput_(echoGetOverlayContract());
   }
   if (action === 'preferences') {
     return jsonOutput_(getEchoPreferenceContext_({ includeAudit: true }));
@@ -1206,6 +1216,43 @@ function echoGetResolutionContract() {
   };
 }
 
+function echoOverlayContract_() {
+  return {
+    version: ECHO_OVERLAY_CONTRACT_VERSION,
+    endpoint: 'GET?action=state',
+    source_of_truth: 'ECHO_WORKBOOK',
+    current_scene: {
+      fields: [
+        'feedId', 'eventId', 'sceneId', 'revisionId', 'revisionNumber',
+        'title', 'narrativeText', 'formattedText', 'text', 'blocks',
+        'resolution', 'sceneType', 'status', 'locationId',
+        'sceneContractVersion', 'resolutionContractVersion'
+      ],
+      blocks_source: 'SCENE_FEED.scene_blocks_json',
+      rendering_rule: 'Render visible blocks in order; use formattedText/text only as a legacy fallback.'
+    },
+    chronicle: {
+      field: 'chronicle',
+      entries_include_blocks: true,
+      entries_include_resolution: true
+    },
+    delivery: {
+      chat_response_mode: 'ACK_ONLY',
+      success_requires: ['validation_status=COMMITTED', 'ui_feed_id'],
+      success_text: 'Übertragen.',
+      narrative_destination: 'currentScene',
+      no_narrative_in_chat: true
+    }
+  };
+}
+
+function echoGetOverlayContract() {
+  return {
+    ok: true,
+    contract: echoOverlayContract_()
+  };
+}
+
 function echoSceneContract_() {
   return {
     version: ECHO_SCENE_CONTRACT_VERSION,
@@ -1224,7 +1271,8 @@ function echoGetSceneContract() {
   return {
     ok: true,
     contract: echoSceneContract_(),
-    resolution_contract: echoResolutionContract_()
+    resolution_contract: echoResolutionContract_(),
+    overlay_contract: echoOverlayContract_()
   };
 }
 
@@ -1647,6 +1695,49 @@ function mergeConditions_(base, additions, removals, duration, eventId) {
 // ECHO read-only overlay state projection.
 // The projection exposes only facts already present in the private state store.
 
+function overlaySceneDeliveryPayload_(scene) {
+  scene = scene || {};
+  var formattedText = sceneTextForOverlay_(scene);
+  var feedId = String(scene.feed_id || '');
+  var eventId = String(scene.event_id || '');
+  var sceneId = String(scene.scene_id || feedId);
+  var revisionId = String(scene.revision_id || '');
+  var revisionNumber = Number(scene.revision_number || 0);
+
+  return {
+    feedId: feedId,
+    feed_id: feedId,
+    eventId: eventId,
+    event_id: eventId,
+    sceneId: sceneId,
+    scene_id: sceneId,
+    revisionId: revisionId,
+    revision_id: revisionId,
+    revisionNumber: revisionNumber,
+    revision_number: revisionNumber,
+    sequence: Number(scene.sequence || 0),
+    title: scene.title || 'Neue Szene',
+    narrativeText: formattedText,
+    formattedText: formattedText,
+    text: formattedText,
+    blocks: sceneBlocksForOverlay_(scene),
+    resolution: normalizeResolution_(scene.resolution_json),
+    sceneType: scene.scene_type || 'narrative',
+    scene_type: scene.scene_type || 'narrative',
+    status: scene.status || 'PLAY',
+    locationId: String(scene.location_id || ''),
+    location_id: String(scene.location_id || ''),
+    mood: scene.mood || 'unbestimmt',
+    contentRating: scene.content_rating || '',
+    intimacyMode: scene.intimacy_mode || '',
+    availableActions: actionsFromScene_(scene.available_actions_json),
+    sceneContractVersion: scene.scene_contract_version || ECHO_SCENE_CONTRACT_VERSION,
+    resolutionContractVersion: ECHO_RESOLUTION_CONTRACT_VERSION,
+    source: 'SCENE_FEED',
+    renderMode: 'BLOCKS_FIRST'
+  };
+}
+
 function getOverlayState_() {
   var state = getStateMap_();
   var overlayWarnings = [];
@@ -1671,21 +1762,18 @@ function getOverlayState_() {
   var memoryState = localizeMemory_(stateValue_(state, 'player.memory_state') || 'NO_MEMORY');
   var currentLocation = locationLabel_(locationId);
 
-  var currentScene = {
-    chapterLabel: chapterLabel_(state),
-    title: scene.title || 'Aktuelle Szene',
-    moodTag: localizeMood_(scene.mood || 'unbestimmt'),
-    text: sceneTextForOverlay_(scene) || 'Noch keine sichtbare Szene im persistenten Spielstand.',
-    blocks: sceneBlocksForOverlay_(scene),
-    sceneType: scene.scene_type || 'narrative',
-    contentRating: scene.content_rating || '',
-    intimacyMode: scene.intimacy_mode || '',
-    resolution: normalizeResolution_(scene.resolution_json),
-    location: currentLocation,
-    locationLabel: currentLocation,
-    locationId: locationId,
-    sceneContractVersion: scene.scene_contract_version || ECHO_SCENE_CONTRACT_VERSION
-  };
+  var currentScene = overlaySceneDeliveryPayload_(scene);
+  currentScene.chapterLabel = chapterLabel_(state);
+  currentScene.title = scene.title || 'Aktuelle Szene';
+  currentScene.moodTag = localizeMood_(scene.mood || 'unbestimmt');
+  if (!currentScene.text) {
+    currentScene.text = 'Noch keine sichtbare Szene im persistenten Spielstand.';
+    currentScene.narrativeText = currentScene.text;
+    currentScene.formattedText = currentScene.text;
+  }
+  currentScene.location = currentLocation;
+  currentScene.locationLabel = currentLocation;
+  currentScene.locationId = locationId;
 
   var conditionNames = conditions.map(conditionName_).filter(function (name) { return !!name; });
   var currentHealth = health === '' ? null : Number(health);
@@ -1756,7 +1844,8 @@ function getOverlayState_() {
     selectedMapRegion: mapRegionIdForLocation_(locationId),
     chapters: chaptersFrom_(state),
     sceneContract: echoSceneContract_(),
-    resolutionContract: echoResolutionContract_()
+    resolutionContract: echoResolutionContract_(),
+    overlayContract: echoOverlayContract_()
   };
 }
 
@@ -2079,12 +2168,21 @@ function chronicleFrom_(scenes, events) {
   var sceneEventIds = {};
 
   scenes.slice().sort(sequenceAscending_).forEach(function (scene) {
+    var delivery = overlaySceneDeliveryPayload_(scene);
     sceneEventIds[String(scene.event_id || '')] = true;
     entries.push({
-      id: scene.feed_id,
-      title: scene.title || 'Neue Szene',
-      text: sceneTextForOverlay_(scene),
-      fiction: String(scene.scene_type || '').toLowerCase() !== 'system'
+      id: delivery.feedId,
+      title: delivery.title,
+      text: delivery.text,
+      narrativeText: delivery.narrativeText,
+      formattedText: delivery.formattedText,
+      blocks: delivery.blocks,
+      resolution: delivery.resolution,
+      sceneType: delivery.sceneType,
+      status: delivery.status,
+      locationId: delivery.locationId,
+      sceneContractVersion: delivery.sceneContractVersion,
+      fiction: String(delivery.sceneType || '').toLowerCase() !== 'system'
     });
   });
 
@@ -2094,6 +2192,13 @@ function chronicleFrom_(scenes, events) {
       id: event.event_id,
       title: 'Ereignis ' + (event.sequence || ''),
       text: event.narrative_summary || event.player_action || '',
+      narrativeText: event.narrative_summary || event.player_action || '',
+      formattedText: event.narrative_summary || event.player_action || '',
+      blocks: [],
+      resolution: null,
+      sceneType: 'event',
+      status: 'COMMITTED',
+      locationId: '',
       fiction: true
     });
   });
@@ -2403,7 +2508,30 @@ function echoGetRuntimeContext() {
     preference_coverage: authoritative.preferences.preferenceCoverage,
     scene_contract: echoSceneContract_(),
     resolution_contract: echoResolutionContract_(),
+    overlay_contract: echoOverlayContract_(),
     preferences: authoritative.preferences
+  };
+}
+
+function echoTurnDelivery_(turn) {
+  turn = turn || {};
+  var status = String(turn.validation_status || '').trim().toUpperCase();
+  var feedId = String(turn.ui_feed_id || '').trim();
+  var overlayReady = status === 'COMMITTED' && !!feedId;
+  var processing = ['PENDING', 'READY', 'PROCESSING', 'RECOVERY_REQUIRED'].indexOf(status) !== -1;
+
+  return {
+    validation_status: status || 'UNKNOWN',
+    overlay_ready: overlayReady,
+    ui_feed_id: overlayReady ? feedId : '',
+    chat_response: overlayReady ? ECHO_CHAT_DELIVERY_POLICY.acknowledgement_on_success : '',
+    include_narrative_in_chat: false,
+    narrative_destination: 'OVERLAY_ONLY',
+    wait_for_processor: processing,
+    requires_readback: !overlayReady && status === 'COMMITTED',
+    error_code: status === 'ERROR'
+      ? String(turn.error_code || 'TURN_PROCESSING_ERROR')
+      : ''
   };
 }
 
@@ -2426,6 +2554,7 @@ function echoSubmitTurn(turn) {
         duplicate: true,
         row: existingRow,
         turn: existing,
+        delivery: echoTurnDelivery_(existing),
         chat_delivery: echoChatDeliveryPolicy_()
       };
     }
@@ -2444,6 +2573,7 @@ function echoSubmitTurn(turn) {
         duplicate: false,
         error: code,
         last_turn: latest,
+        delivery: echoTurnDelivery_(latest),
         chat_delivery: echoChatDeliveryPolicy_()
       };
     }
@@ -2495,6 +2625,7 @@ function echoSubmitTurn(turn) {
       duplicate: false,
       row: targetRow,
       turn: written,
+      delivery: echoTurnDelivery_(written),
       chat_delivery: echoChatDeliveryPolicy_()
     };
   } finally {
@@ -2508,9 +2639,24 @@ function echoGetTurnStatus(turnId) {
   const inbox = echoFastRequireSheet_(echoFastSpreadsheet_(), 'TURN_INBOX');
   const row = echoFastFindTurnRow_(inbox, id);
 
-  return row
-    ? { ok: true, found: true, row: row, turn: echoFastReadInboxRow_(inbox, row) }
-    : { ok: true, found: false, turn_id: id };
+  if (!row) {
+    return {
+      ok: true,
+      found: false,
+      turn_id: id,
+      delivery: echoTurnDelivery_({ validation_status: 'NOT_FOUND' })
+    };
+  }
+
+  var turn = echoFastReadInboxRow_(inbox, row);
+  return {
+    ok: true,
+    found: true,
+    row: row,
+    turn: turn,
+    delivery: echoTurnDelivery_(turn),
+    chat_delivery: echoChatDeliveryPolicy_()
+  };
 }
 
 /** Router for an optional Web App or future custom connector. */
@@ -2526,6 +2672,8 @@ function echoHandleGatewayRequest(request) {
       return echoGetSceneContract();
     case 'resolution-contract':
       return echoGetResolutionContract();
+    case 'overlay-contract':
+      return echoGetOverlayContract();
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
