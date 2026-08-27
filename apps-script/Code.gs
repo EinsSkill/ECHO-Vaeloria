@@ -520,6 +520,32 @@ function jsonOutput_(object) {
  * A correction updates the presentation of an existing scene. It must not create
  * a second timeline event or apply relationship/state deltas a second time.
  */
+function fullThreeTruthsSceneText_() {
+  return "Die geschützte Mulde liegt still zwischen zerbrochenen Mauern. Feuchte Wurzeln greifen durch alten Stein, und über dem Wald verliert der graue Tag langsam seine Kraft.\n\n\n\nDu siehst noch einmal an dir hinab. Das beschädigte Tuch hängt nass und schwer an deiner Hüfte. Dann hebst du den Blick wieder zu Mireth.\n\n\n\n„Okay“, sagst du. „Ich werde Geduld haben. Du wirst sehen.“\n\n\n\nDu lässt das freche Grinsen ein wenig schmaler werden.\n\n\n\n„Ich werde nun nichts mehr in dieser Richtung zu dir sagen, bis du das nächste Mal auf mich damit zukommst. Ich werde so brav sein, wie du es bisher noch nicht gemerkt hast, bis du es erlaubst, etwas zu tun.“\n\n\n\nFür einen Moment antwortet Mireth nicht. Ihr Blick bleibt auf deinem Gesicht liegen, ruhig und aufmerksam. Nicht misstrauisch. Aber auch nicht bereit, dir das Versprechen einfach abzunehmen.\n\n\n\n„Brav“, wiederholt sie schließlich.\n\n\n\nDas Wort klingt in ihrem Mund nicht wie Spott. Eher wie eine Prüfung, deren Regeln noch nicht vollständig ausgesprochen worden sind.\n\n\n\n„Ein Wort ist schnell gesagt. Interessant wird es erst danach.“\n\n\n\nSie lässt dir gerade genug Zeit, um zu verstehen, dass sie nicht nur deine Absicht meint, bevor sie den Blick über die Mulde schweifen lässt.\n\n\n\n„Du wolltest, dass ich dir zeige, wie ich einen Lagerplatz prüfe?“\n\n\n\nDu nickst.\n\n\n\n„Dann beobachte. Nicht nur mich. Den Ort.“\n\n\n\nMireth geht nicht sofort in die Mitte der Mulde. Sie bleibt zunächst am Rand stehen und dreht sich langsam, bis sie jeden Abschnitt des gebrochenen Mauerkranzes gesehen hat.\n\n\n\n„Wir beginnen nicht dort, wo es bequem aussieht“, sagt sie. „Wir beginnen dort, wo jemand zu uns kommen könnte.“\n\n\n\nSie deutet auf den schmaleren Zugang zwischen zwei schief stehenden Steinen. Der Weg zurück zum alten Pfad ist von Wurzeln, feuchtem Laub und niedrigem Gestrüpp verdeckt. Von hier aus ist er nicht vollständig einsehbar.\n\n\n\n„Der erste Zugang ist eng genug, um eine Bewegung zu verlangsamen. Das ist nützlich, wenn wir ihn verteidigen müssen. Es ist gefährlich, wenn wir fliehen müssen und jemand uns bereits erwartet.“\n\n\n\nMireth geht einige Schritte weiter, ohne den Boden aus den Augen zu lassen.\n\n\n\n„Der zweite Zugang liegt dort hinten. Breiter. Schlechter gedeckt. Dafür sehen wir früher, wenn sich etwas nähert.“\n\n\n\nSie bleibt stehen und sieht zu dir zurück.\n\n\n\n„Was folgt daraus?“\n\n\n\nDu lässt deinen Blick über die beiden Wege wandern. Nicht nur über das, was offen sichtbar ist, sondern auch über die Stellen dazwischen. Mireth wartet, ohne dir die Antwort abzunehmen.\n\n\n\nErst als du lange genug geschaut hast, nickt sie knapp.\n\n\n\n„Gut. Ein Ort ist nicht sicher, nur weil man von einer Stelle aus nichts Bedrohliches sieht.“\n\n\n\nSie führt dich weiter zum trockeneren Kern der Mulde. Dort liegt der Boden etwas höher. Eine niedrige Mauer nimmt den Wind, und die zerbrochenen Steine brechen die Sicht aus mehreren Richtungen.\n\n\n\n„Hier könnten wir liegen. Nicht bequem. Nicht warm. Aber weniger sichtbar als dort draußen.“\n\n\n\nMireth geht in die Hocke und streicht nicht über den Boden. Sie betrachtet nur die feuchten Stellen, die Wurzeln und die kleinen Vertiefungen zwischen den Steinen.\n\n\n\n„Kein frisches Feuer. Keine frisch zerdrückten Pflanzen. Keine eindeutige Spur von mehreren Personen.“\n\n\n\nSie hebt den Blick zu dir.\n\n\n\n„Sag nicht: keine Spuren.“\n\n\n\nIhre Stimme wird leiser, aber dadurch nicht weniger bestimmt.\n\n\n\n„Sag: keine klaren frischen Spuren. Das ist ein Unterschied.“\n\n\n\nAm Rand der Mulde bleibt sie vor einem niedrigen Durchlass stehen. Farn hängt über einer dunklen Öffnung, die halb unter einer Wurzel verschwindet.\n\n\n\n„Und dort?“\n\n\n\nDu siehst hinein, ohne dich näher heranzuwagen.\n\n\n\n„Ein möglicher Durchlass“, sagst du vorsichtig.\n\n\n\n„Möglich“, bestätigt Mireth. „Mehr wissen wir noch nicht.“\n\n\n\nSie nimmt einen trockenen Zweig vom Boden. Nicht ihre Hand. Nicht ihren Fuß. Mit der Spitze prüft sie zuerst den sichtbaren Rand, dann die Erde darunter. Nichts kippt. Keine Schnur spannt sich. Kein Stein rutscht aus seiner Lage.\n\n\n\nSie prüft noch einmal die Seiten und lässt den Zweig anschließend sinken.\n\n\n\n„Keine sichtbare Falle. Das bedeutet nicht, dass dort keine ist.“\n\n\n\n„Du gehst also immer davon aus, dass eine da sein könnte?“\n\n\n\n„Nein.“\n\n\n\nMireth sieht dich an.\n\n\n\n„Ich gehe davon aus, dass ich es nicht weiß. Das reicht, um meine Hand nicht blind in ein Loch zu stecken.“\n\n\n\nSie richtet sich wieder auf. Für einen kurzen Moment steht sie so nah, dass du ihre Wärme trotz des feuchten Windes wahrnimmst. Sie berührt dich nicht. Sie muss es nicht. Ihre Aufmerksamkeit liegt bereits schwer genug auf dir.\n\n\n\n„Du wolltest mir zusehen. Also merk dir: Erst sehen. Dann prüfen. Dann entscheiden.“\n\n\n\nIhr Blick wandert zu den Mauerresten.\n\n\n\n„Ein Feuer wäre hier angenehm.“\n\n\n\n„Aber keine gute Idee“, sagst du.\n\n\n\n„Warum?“\n\n\n\n„Rauch. Licht. Und wir kennen die Gegend noch nicht gut genug.“\n\n\n\nMireth hält deinen Blick einen Herzschlag länger fest.\n\n\n\n„Richtig. Nicht, weil Feuer grundsätzlich falsch wäre. Weil ein Vorteil an einem unbekannten Ort gleichzeitig eine Einladung sein kann.“\n\n\n\nSie zeigt dir noch einmal den trockeneren Kern.\n\n\n\n„Der Platz ist brauchbar. Vorläufig. Zwei Zugänge, etwas Deckung, kein offenes Feuer, keine klaren frischen Spuren. Mehr wissen wir nicht.“\n\n\n\nDann dreht sie sich vollständig zu dir um.\n\n\n\n„Und jetzt zu deiner anderen Bitte.“\n\n\n\nDer Kristall in deiner Hand bleibt still. Auch die Runen geben keine Antwort. Mireth bemerkt deinen Blick, wartet aber, bis du wieder sie ansiehst.\n\n\n\n„Du wolltest etwas über ECHO lernen“, sagt sie. „Dann lernst du zuerst, was du nicht tun wirst.“\n\n\n\nSie tritt einen halben Schritt näher.\n\n\n\n„Du wirst nichts erzwingen. Du wirst nichts hineininterpretieren, nur weil du dir eine Antwort wünschst. Und du wirst mir nicht erzählen, was du glaubst, bevor du mir sagst, was du tatsächlich wahrnimmst.“\n\n\n\n„Was soll ich tun?“\n\n\n\n„Drei wahre Dinge finden.“\n\n\n\nMireth hebt drei Finger, langsam und ohne jede Hast.\n\n\n\n„Keine Deutung. Kein Wunsch. Keine Geschichte.“\n\n\n\nDer erste Finger sinkt.\n\n\n\n„Etwas, das dein Körper sicher weiß. Kälte auf der Haut. Druck unter den Füßen. Spannung in einer Schulter.“\n\n\n\nDer zweite Finger sinkt.\n\n\n\n„Etwas, das du mit deinen Sinnen wahrnimmst. Wind von einer Seite. Wasser in der Ferne. Der Geruch von feuchtem Stein.“\n\n\n\nDer dritte Finger sinkt.\n\n\n\n„Und etwas, bei dem du ehrlich sagen kannst, dass du es nicht weißt.“\n\n\n\nDu willst etwas erwidern, doch Mireth hebt eine Hand. Nicht scharf. Nur früh genug, um dich zum Warten zu bringen.\n\n\n\n„Wenn du vermutest, sag, dass du vermutest. Wenn du hoffst, sag, dass du hoffst. Aber verkleide beides nicht als Wahrheit.“\n\n\n\nIhr Blick geht kurz zum schwarzen Kristall und kehrt dann zu dir zurück.\n\n\n\n„Das ist die erste Tür zu Resonanz. Nicht Macht. Wahrhaftigkeit.“\n\n\n\nSie deutet auf den Boden vor dir.\n\n\n\n„Stell dich dorthin. Schließe die Augen nur, wenn du möchtest. Du musst nichts beweisen.“\n\n\n\nEine kurze Pause.\n\n\n\n„Aber wenn du anfängst, dann hörst du nicht nach dem ersten Eindruck auf. Du bleibst ruhig. Du prüfst, ob es wirklich da ist.“\n\n\n\nDer Wald schweigt. Keine Glocke schlägt. Hinter den Mauern bewegt sich nur der Wind durch das feuchte Laub.\n\n\n\nMireth wartet.\n\n\n\n„Drei wahre Dinge“, sagt sie noch einmal. „Und wenn du nur zwei findest, sagst du zwei. Wenn du keines sicher benennen kannst, sagst du das.“\n\n\n\nIhre Stimme wird weicher, ohne an Klarheit zu verlieren.\n\n\n\n„Jetzt zeig mir, ob du gelernt hast, zwischen dem, was du willst, und dem, was wirklich vor dir liegt, zu unterscheiden.“";
+}
+
+function sceneTextForCorrection_(event) {
+  if (isSceneCorrection_(event) &&
+      String(event.correction_for_turn_id || '') === 'TURN-20260826-2356-A11C') {
+    return fullThreeTruthsSceneText_();
+  }
+  return String(event && event.scene && event.scene.narrative_text || '');
+}
+
+function sceneTextForOverlay_(scene) {
+  if (!scene) return '';
+  var feedId = String(scene.feed_id || '');
+  var eventId = String(scene.event_id || '');
+  if ([
+    'SCENE-20260826-2356-A11C',
+    'SCENE-CORRECTION-20260827-0020-F4D8'
+  ].indexOf(feedId) !== -1 ||
+      eventId === 'EVT-PLAYER-20260826-2356-A11C') {
+    return fullThreeTruthsSceneText_();
+  }
+  return String(scene.narrative_text || '');
+}
+
 function isSceneCorrection_(event) {
   return event &&
     String(event.event_type || '').toUpperCase() === 'SYSTEM_CORRECTION' &&
@@ -613,7 +639,10 @@ function commitSceneCorrection_(event) {
       'intimacy_mode'
     ].forEach(function (key) {
       if (event.scene[key] !== undefined && event.scene[key] !== null) {
-        setCellByHeader_(sceneFeedSheet, targetScene.__rowNumber, key, event.scene[key]);
+        var value = key === 'narrative_text'
+          ? sceneTextForCorrection_(event)
+          : event.scene[key];
+        setCellByHeader_(sceneFeedSheet, targetScene.__rowNumber, key, value);
       }
     });
 
@@ -1024,7 +1053,7 @@ function getOverlayState_() {
     chapterLabel: chapterLabel_(state),
     title: scene.title || 'Aktuelle Szene',
     moodTag: localizeMood_(scene.mood || 'unbestimmt'),
-    text: scene.narrative_text || 'Noch keine sichtbare Szene im persistenten Spielstand.',
+    text: sceneTextForOverlay_(scene) || 'Noch keine sichtbare Szene im persistenten Spielstand.',
     sceneType: scene.scene_type || 'narrative',
     contentRating: scene.content_rating || '',
     intimacyMode: scene.intimacy_mode || '',
@@ -1203,7 +1232,7 @@ function chronicleFrom_(scenes, events) {
     entries.push({
       id: scene.feed_id,
       title: scene.title || 'Neue Szene',
-      text: scene.narrative_text || '',
+      text: sceneTextForOverlay_(scene),
       fiction: String(scene.scene_type || '').toLowerCase() !== 'system'
     });
   });
