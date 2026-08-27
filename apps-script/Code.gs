@@ -37,6 +37,7 @@ var ECHO_SCENE_CONTRACT_VERSION = '1.0.0';
 var ECHO_RESOLUTION_CONTRACT_VERSION = '1.0.0';
 var ECHO_OVERLAY_CONTRACT_VERSION = '1.0.0';
 var ECHO_PROJECTION_CONTRACT_VERSION = '1.0.0';
+var ECHO_CONTEXT_BINDING_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -160,6 +161,9 @@ function doGet(e) {
   }
   if (action === 'projection-contract') {
     return jsonOutput_(echoGetProjectionContract());
+  }
+  if (action === 'context-binding-contract') {
+    return jsonOutput_(echoGetContextBindingContract());
   }
   if (action === 'preferences') {
     return jsonOutput_(getEchoPreferenceContext_({ includeAudit: true }));
@@ -459,7 +463,9 @@ function enqueueTurn_(event) {
       commit_event_id: '',
       ui_feed_id: '',
       error_code: '',
-      processed_at: ''
+      processed_at: '',
+      context_fingerprint: event.context_fingerprint || '',
+      context_read_at: event.context_read_at || ''
     });
 
     return {
@@ -1313,6 +1319,25 @@ function echoGetProjectionContract() {
   };
 }
 
+
+function echoContextBindingContract_() {
+  return {
+    version: ECHO_CONTEXT_BINDING_VERSION,
+    supplied_field: 'context_fingerprint',
+    statuses: ['MATCHED', 'NOT_PROVIDED', 'STALE', 'UNAVAILABLE'],
+    stale_policy: 'REJECT_BEFORE_COMMIT',
+    legacy_policy: 'Turns without a context fingerprint remain accepted for compatibility.',
+    revalidation: 'Compare the supplied fingerprint with a fresh authoritative workbook context immediately before commit.'
+  };
+}
+
+function echoGetContextBindingContract() {
+  return {
+    ok: true,
+    contract: echoContextBindingContract_()
+  };
+}
+
 function echoSceneContract_() {
   return {
     version: ECHO_SCENE_CONTRACT_VERSION,
@@ -1456,13 +1481,15 @@ function processTurnInbox_() {
         var result;
         if (isSceneCorrection_(event)) {
           result = commitSceneCorrectionCore_(event, {
-            transactionId: row.transaction_id || ''
+            transactionId: row.transaction_id || '',
+            submittedContextFingerprint: row.context_fingerprint || ''
           });
         } else {
           validateEventShape_(event);
           result = commitTurnCore_(event, {
             skipInboxAppend: true,
-            transactionId: row.transaction_id || ''
+            transactionId: row.transaction_id || '',
+            submittedContextFingerprint: row.context_fingerprint || ''
           });
         }
 
@@ -2192,6 +2219,75 @@ function echoPhase4BuildProjections_(state, scene, relationshipRows, groupRows, 
     relationshipCount: relationships.length,
     groupCount: groups.length,
     warnings: warnings || []
+  };
+}
+
+
+/* ===== Phase 5: context binding and stale-turn protection ===== */
+
+function echoPhase5ContextBinding_(suppliedFingerprint, currentFingerprint) {
+  var supplied = String(suppliedFingerprint || '').trim();
+  var current = String(currentFingerprint || '').trim();
+
+  if (!supplied) {
+    return {
+      version: ECHO_CONTEXT_BINDING_VERSION,
+      status: 'NOT_PROVIDED',
+      accepted: true,
+      supplied: false,
+      suppliedFingerprint: '',
+      currentFingerprint: current || null
+    };
+  }
+
+  if (!current) {
+    return {
+      version: ECHO_CONTEXT_BINDING_VERSION,
+      status: 'UNAVAILABLE',
+      accepted: false,
+      supplied: true,
+      suppliedFingerprint: supplied,
+      currentFingerprint: null
+    };
+  }
+
+  if (supplied === current) {
+    return {
+      version: ECHO_CONTEXT_BINDING_VERSION,
+      status: 'MATCHED',
+      accepted: true,
+      supplied: true,
+      suppliedFingerprint: supplied,
+      currentFingerprint: current
+    };
+  }
+
+  return {
+    version: ECHO_CONTEXT_BINDING_VERSION,
+    status: 'STALE',
+    accepted: false,
+    supplied: true,
+    suppliedFingerprint: supplied,
+    currentFingerprint: current
+  };
+}
+
+function echoPhase5AssertContextBinding_(event, options, currentContext) {
+  event = event || {};
+  options = options || {};
+  var context = currentContext || getEchoAuthoritativeContext_({ includePrivate: false });
+  var supplied = options.submittedContextFingerprint || event.context_fingerprint || '';
+  var binding = echoPhase5ContextBinding_(supplied, context.fingerprint);
+
+  if (!binding.accepted) {
+    throw new Error(
+      binding.status + ': context must be reread before this turn is committed.'
+    );
+  }
+
+  return {
+    context: context,
+    binding: binding
   };
 }
 
@@ -2984,6 +3080,7 @@ function echoGetRuntimeContext() {
     resolution_contract: echoResolutionContract_(),
     overlay_contract: echoOverlayContract_(),
     projection_contract: echoProjectionContract_(),
+    context_binding_contract: echoContextBindingContract_(),
     projections: authoritative.projections,
     preferences: authoritative.preferences
   };
@@ -3152,6 +3249,8 @@ function echoHandleGatewayRequest(request) {
       return echoGetOverlayContract();
     case 'projection-contract':
       return echoGetProjectionContract();
+    case 'context-binding-contract':
+      return echoGetContextBindingContract();
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
@@ -5454,6 +5553,7 @@ function echoPhase2CommitPlan_(event, options) {
   validatePhase2EventUpdates_(event);
 
   var context = getEchoAuthoritativeContext_({ includePrivate: false });
+  var contextBinding = echoPhase5AssertContextBinding_(event, options, context);
   var existing = echoPhase2StartTransaction_(event, {
     transactionId: options.transactionId || '',
     contextFingerprint: context.fingerprint
@@ -5598,6 +5698,7 @@ function commitSceneCorrectionCore_(event, options) {
   options = options || {};
   validateSceneCorrection_(event);
   echoPhase2EnsureSchema_();
+  var correctionContextBinding = echoPhase5AssertContextBinding_(event, options, null);
 
   var turnInboxSheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
   var originalTurn = findRow_(
