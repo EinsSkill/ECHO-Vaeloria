@@ -50,8 +50,8 @@ for (const sheet of [
 
 const correctionStart = code.indexOf('function commitSceneCorrectionCore_');
 const correctionEnd = code.indexOf('\nfunction ', correctionStart + 10);
-assert(correctionStart >= 0 && correctionEnd > correctionStart, 'correction core must exist');
-const correction = code.slice(correctionStart, correctionEnd);
+assert(correctionStart >= 0, 'correction core must exist');
+const correction = code.slice(correctionStart, correctionEnd < 0 ? code.length : correctionEnd);
 assert(correction.includes('echoPhase2AppendSceneRevision_'), 'correction must append a revision');
 assert(!correction.includes('setCellByHeader_'), 'correction must not mutate the old scene row');
 
