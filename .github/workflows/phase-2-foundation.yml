@@ -1,8 +1,8 @@
-name: Phase 3 narrative foundation
+name: Phase 3B resolution foundation
 
 on:
   push:
-    branches: [main, phase-3-narrative-runtime]
+    branches: [main, phase-3b-resolution-runtime]
   pull_request:
     branches: [main]
 
@@ -24,3 +24,5 @@ jobs:
         run: node tests/phase-2-foundation.test.js
       - name: Run Phase 3A checks
         run: node tests/phase-3-narrative-runtime.test.js
+      - name: Run Phase 3B checks
+        run: node tests/phase-3b-resolution-runtime.test.js

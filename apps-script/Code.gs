@@ -29,11 +29,12 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-3-narrative-runtime-2026-08-27';
+var ECHO_BUILD_ID = 'phase-3b-resolution-runtime-2026-08-27';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
 var ECHO_SCENE_CONTRACT_VERSION = '1.0.0';
+var ECHO_RESOLUTION_CONTRACT_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -143,6 +144,9 @@ function doGet(e) {
   if (action === 'scene-contract') {
     return jsonOutput_(echoGetSceneContract());
   }
+  if (action === 'resolution-contract') {
+    return jsonOutput_(echoGetResolutionContract());
+  }
   if (action === 'preferences') {
     return jsonOutput_(getEchoPreferenceContext_({ includeAudit: true }));
   }
@@ -244,7 +248,7 @@ function processTurnInbox() {
 // ECHO turn contract and inbox boundary.
 // This module is public and secret-free. Live state remains in the private sheet.
 
-var ECHO_CONTRACT_VERSION = '3.1.0';
+var ECHO_CONTRACT_VERSION = '3.2.0';
 
 var ECHO_RELATIONSHIP_NUMERIC_FIELDS = {
   trust: true,
@@ -299,6 +303,7 @@ function validateEventShape_(event) {
     throw new Error('scene.available_actions_json must be an array');
   }
   validateSceneBlocks_(event.scene);
+  normalizeResolution_(event.resolution);
   if (!event.state_updates || typeof event.state_updates !== 'object' || Array.isArray(event.state_updates)) {
     throw new Error('state_updates must be an object');
   }
@@ -483,8 +488,8 @@ function setupEchoSchema() {
     'consent_state', 'boundaries_json', 'intimacy_phase', 'intimacy_profile_json',
     'teaching'
   ]);
-  ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode']);
-  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'scene_blocks_json', 'scene_contract_version']);
+  ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode', 'resolution_json', 'resolution_mode', 'resolution_outcome']);
+  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'scene_blocks_json', 'scene_contract_version', 'resolution_json']);
   return {
     ok: true,
     phase2: phase2,
@@ -874,6 +879,333 @@ function validateSceneBlocks_(scene) {
   normalizeSceneBlocks_(raw, { strict: true });
 }
 
+var ECHO_RESOLUTION_MODES_ = {
+  ROLL: 'ROLL',
+  NO_ROLL: 'NO_ROLL',
+  NO_CHECK: 'NO_CHECK'
+};
+
+var ECHO_RESOLUTION_OUTCOMES_ = {
+  CRITICAL_FAILURE: 'CRITICAL_FAILURE',
+  FAILURE: 'FAILURE',
+  SUCCESS: 'SUCCESS',
+  CRITICAL_SUCCESS: 'CRITICAL_SUCCESS'
+};
+
+function resolutionRaw_(value) {
+  if (value === undefined || value === null || value === '') return {};
+  if (typeof value === 'string') {
+    var parsed = parseJsonValue_(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('resolution must be an object or JSON object.');
+    }
+    return parsed;
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('resolution must be an object.');
+  }
+  return value;
+}
+
+function resolutionField_(raw, keys, fallback) {
+  for (var i = 0; i < keys.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(raw, keys[i]) &&
+        raw[keys[i]] !== undefined && raw[keys[i]] !== null && raw[keys[i]] !== '') {
+      return raw[keys[i]];
+    }
+  }
+  return fallback;
+}
+
+function resolutionBoolean_(value) {
+  if (value === true || value === 1) return true;
+  var normalized = String(value === undefined || value === null ? '' : value)
+    .trim()
+    .toLowerCase();
+  return ['true', '1', 'yes', 'ja', 'y'].indexOf(normalized) !== -1;
+}
+
+function resolutionInteger_(value, field, minimum, maximum) {
+  if (value === undefined || value === null || value === '') return null;
+  var number = Number(value);
+  if (!isFinite(number) || Math.floor(number) !== number) {
+    throw new Error(field + ' must be an integer.');
+  }
+  if (number < minimum || number > maximum) {
+    throw new Error(field + ' must be between ' + minimum + ' and ' + maximum + '.');
+  }
+  return number;
+}
+
+function resolutionMode_(value, raw) {
+  var candidate = String(value || '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (!candidate) {
+    if (resolutionBoolean_(resolutionField_(raw, ['explicit_no_roll', 'explicitNoRoll', 'no_roll_confirmed'], false))) {
+      return ECHO_RESOLUTION_MODES_.NO_ROLL;
+    }
+    if (resolutionField_(raw, ['d20', 'roll', 'w20', 'dc', 'difficulty', 'sg', 'check', 'check_name', 'skill'], null) !== null) {
+      return ECHO_RESOLUTION_MODES_.ROLL;
+    }
+    return ECHO_RESOLUTION_MODES_.NO_CHECK;
+  }
+
+  var aliases = {
+    ROLL: ECHO_RESOLUTION_MODES_.ROLL,
+    CHECK: ECHO_RESOLUTION_MODES_.ROLL,
+    D20: ECHO_RESOLUTION_MODES_.ROLL,
+    NO_ROLL: ECHO_RESOLUTION_MODES_.NO_ROLL,
+    WITHOUT_ROLL: ECHO_RESOLUTION_MODES_.NO_ROLL,
+    WITHOUT_DICE: ECHO_RESOLUTION_MODES_.NO_ROLL,
+    NO_DICE: ECHO_RESOLUTION_MODES_.NO_ROLL,
+    NO_DICE_ROLL: ECHO_RESOLUTION_MODES_.NO_ROLL,
+    EXPLICIT_NO_ROLL: ECHO_RESOLUTION_MODES_.NO_ROLL,
+    NO_CHECK: ECHO_RESOLUTION_MODES_.NO_CHECK,
+    NONE: ECHO_RESOLUTION_MODES_.NO_CHECK,
+    AUTO: ECHO_RESOLUTION_MODES_.NO_CHECK,
+    AUTOMATIC: ECHO_RESOLUTION_MODES_.NO_CHECK
+  };
+  if (!aliases[candidate]) throw new Error('Unknown resolution mode: ' + candidate);
+  return aliases[candidate];
+}
+
+function resolutionOutcomeFromRoll_(d20, total, dc) {
+  if (d20 === 20) return ECHO_RESOLUTION_OUTCOMES_.CRITICAL_SUCCESS;
+  if (d20 === 1) return ECHO_RESOLUTION_OUTCOMES_.CRITICAL_FAILURE;
+  return total >= dc
+    ? ECHO_RESOLUTION_OUTCOMES_.SUCCESS
+    : ECHO_RESOLUTION_OUTCOMES_.FAILURE;
+}
+
+function resolutionOutcome_(value) {
+  var candidate = String(value || '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+  var aliases = {
+    CRITICAL_SUCCESS: ECHO_RESOLUTION_OUTCOMES_.CRITICAL_SUCCESS,
+    CRIT_SUCCESS: ECHO_RESOLUTION_OUTCOMES_.CRITICAL_SUCCESS,
+    NATURAL_20: ECHO_RESOLUTION_OUTCOMES_.CRITICAL_SUCCESS,
+    NAT20: ECHO_RESOLUTION_OUTCOMES_.CRITICAL_SUCCESS,
+    SUCCESS: ECHO_RESOLUTION_OUTCOMES_.SUCCESS,
+    SUCCEEDED: ECHO_RESOLUTION_OUTCOMES_.SUCCESS,
+    ERFOLG: ECHO_RESOLUTION_OUTCOMES_.SUCCESS,
+    CRITICAL_FAILURE: ECHO_RESOLUTION_OUTCOMES_.CRITICAL_FAILURE,
+    CRIT_FAILURE: ECHO_RESOLUTION_OUTCOMES_.CRITICAL_FAILURE,
+    NATURAL_1: ECHO_RESOLUTION_OUTCOMES_.CRITICAL_FAILURE,
+    NAT1: ECHO_RESOLUTION_OUTCOMES_.CRITICAL_FAILURE,
+    FAILURE: ECHO_RESOLUTION_OUTCOMES_.FAILURE,
+    FAILED: ECHO_RESOLUTION_OUTCOMES_.FAILURE,
+    FEHLSCHLAG: ECHO_RESOLUTION_OUTCOMES_.FAILURE
+  };
+  if (!aliases[candidate]) throw new Error('Unknown resolution outcome: ' + candidate);
+  return aliases[candidate];
+}
+
+function resolutionOutcomeLabel_(outcome) {
+  return {
+    CRITICAL_SUCCESS: 'Kritischer Erfolg',
+    SUCCESS: 'Erfolg',
+    FAILURE: 'Fehlschlag',
+    CRITICAL_FAILURE: 'Kritischer Fehlschlag'
+  }[outcome] || 'unbekannt';
+}
+
+function normalizeResolution_(value) {
+  var supplied = !(value === undefined || value === null || value === '');
+  var raw = resolutionRaw_(value);
+  var mode = resolutionMode_(
+    resolutionField_(raw, ['mode', 'roll_mode', 'resolution_mode'], ''),
+    raw
+  );
+  var reason = String(resolutionField_(
+    raw,
+    ['reason', 'no_roll_reason', 'explanation'],
+    ''
+  ) || '').trim();
+  var source = String(resolutionField_(raw, ['source'], 'ECHO_CHATGPT') || 'ECHO_CHATGPT').trim();
+
+  if (mode === ECHO_RESOLUTION_MODES_.ROLL) {
+    var check = String(resolutionField_(
+      raw,
+      ['check', 'check_name', 'label', 'skill', 'probe', 'attribute'],
+      ''
+    ) || '').trim();
+    if (!check) throw new Error('resolution.check is required for ROLL.');
+
+    var dc = resolutionInteger_(
+      resolutionField_(raw, ['dc', 'difficulty', 'sg'], null),
+      'resolution.dc',
+      1,
+      40
+    );
+    var d20 = resolutionInteger_(
+      resolutionField_(raw, ['d20', 'roll', 'w20'], null),
+      'resolution.d20',
+      1,
+      20
+    );
+    if (dc === null) throw new Error('resolution.dc is required for ROLL.');
+    if (d20 === null) throw new Error('resolution.d20 is required for ROLL.');
+
+    var modifier = resolutionInteger_(
+      resolutionField_(raw, ['modifier', 'mod', 'bonus', 'check_modifier'], 0),
+      'resolution.modifier',
+      -50,
+      50
+    );
+    if (modifier === null) modifier = 0;
+
+    var total = d20 + modifier;
+    var suppliedTotal = resolutionInteger_(
+      resolutionField_(raw, ['total', 'sum', 'result_total'], null),
+      'resolution.total',
+      -49,
+      90
+    );
+    if (suppliedTotal !== null && suppliedTotal !== total) {
+      throw new Error('resolution.total does not match d20 + modifier.');
+    }
+
+    var outcome = resolutionOutcomeFromRoll_(d20, total, dc);
+    var suppliedOutcome = resolutionField_(raw, ['outcome', 'result'], null);
+    if (suppliedOutcome !== null && resolutionOutcome_(suppliedOutcome) !== outcome) {
+      throw new Error('resolution.outcome does not match the roll.');
+    }
+
+    return {
+      version: ECHO_RESOLUTION_CONTRACT_VERSION,
+      mode: ECHO_RESOLUTION_MODES_.ROLL,
+      check: check,
+      dc: dc,
+      d20: d20,
+      modifier: modifier,
+      total: total,
+      outcome: outcome,
+      source: source || 'ECHO_CHATGPT'
+    };
+  }
+
+  if (mode === ECHO_RESOLUTION_MODES_.NO_ROLL) {
+    var explicitNoRoll = resolutionBoolean_(resolutionField_(
+      raw,
+      ['explicit_no_roll', 'explicitNoRoll', 'no_roll_confirmed'],
+      false
+    ));
+    if (!explicitNoRoll) {
+      throw new Error('NO_ROLL requires explicit_no_roll=true.');
+    }
+    if (['d20', 'roll', 'w20', 'total', 'sum', 'result_total', 'dc', 'difficulty', 'sg']
+      .some(function (key) { return Object.prototype.hasOwnProperty.call(raw, key); })) {
+      throw new Error('NO_ROLL cannot contain dice, total or DC fields.');
+    }
+    if (!reason) throw new Error('resolution.reason is required for NO_ROLL.');
+
+    return {
+      version: ECHO_RESOLUTION_CONTRACT_VERSION,
+      mode: ECHO_RESOLUTION_MODES_.NO_ROLL,
+      explicit_no_roll: true,
+      reason: reason,
+      source: source || 'ECHO_CHATGPT'
+    };
+  }
+
+  if (supplied && !reason) {
+    throw new Error('resolution.reason is required for NO_CHECK.');
+  }
+
+  return {
+    version: ECHO_RESOLUTION_CONTRACT_VERSION,
+    mode: ECHO_RESOLUTION_MODES_.NO_CHECK,
+    reason: reason || 'Keine Probe erforderlich.',
+    source: source || 'ECHO_CHATGPT'
+  };
+}
+
+function resolutionSystemText_(resolution) {
+  var normalized = normalizeResolution_(resolution);
+  if (normalized.mode === ECHO_RESOLUTION_MODES_.ROLL) {
+    var modifierText = normalized.modifier >= 0
+      ? '+' + normalized.modifier
+      : String(normalized.modifier);
+    return 'Probe: ' + normalized.check +
+      ' · W20: ' + normalized.d20 +
+      ' · Modifikator: ' + modifierText +
+      ' · SG: ' + normalized.dc +
+      ' · Gesamt: ' + normalized.total +
+      ' · Ergebnis: ' + resolutionOutcomeLabel_(normalized.outcome);
+  }
+  if (normalized.mode === ECHO_RESOLUTION_MODES_.NO_ROLL) {
+    return 'Keine Probe erforderlich · ausdrücklich ohne Würfel · ' + normalized.reason;
+  }
+  return 'Keine Probe erforderlich · ' + normalized.reason;
+}
+
+function resolutionSystemBlock_(resolution) {
+  return {
+    type: 'system',
+    text: resolutionSystemText_(resolution),
+    speaker: 'SYSTEM',
+    character_id: '',
+    tone: '',
+    emphasis: ''
+  };
+}
+
+function sceneBlocksWithResolution_(rawBlocks, resolution) {
+  var normalizedResolution = normalizeResolution_(resolution);
+  var blocks = normalizeSceneBlocks_(rawBlocks, { strict: true });
+  var filtered = blocks.filter(function (block) {
+    return !(block.type === 'system' &&
+      (/^Probe:\s/.test(String(block.text || '')) ||
+       /^Keine Probe erforderlich/.test(String(block.text || ''))));
+  });
+  var insertAt = filtered.length;
+  for (var i = 0; i < filtered.length; i++) {
+    if (['change', 'status', 'prompt'].indexOf(filtered[i].type) !== -1) {
+      insertAt = i;
+      break;
+    }
+  }
+  filtered.splice(insertAt, 0, resolutionSystemBlock_(normalizedResolution));
+  return filtered;
+}
+
+function echoResolutionContract_() {
+  return {
+    version: ECHO_RESOLUTION_CONTRACT_VERSION,
+    modes: [
+      {
+        mode: ECHO_RESOLUTION_MODES_.ROLL,
+        required: ['check', 'dc', 'd20'],
+        optional: ['modifier'],
+        validation: 'd20 1–20; modifier -50–50; total must equal d20 + modifier; natural 20/1 are critical.'
+      },
+      {
+        mode: ECHO_RESOLUTION_MODES_.NO_ROLL,
+        required: ['explicit_no_roll', 'reason'],
+        forbidden: ['d20', 'roll', 'total', 'dc', 'difficulty'],
+        validation: 'Only an explicitly marked no-roll action may bypass a check.'
+      },
+      {
+        mode: ECHO_RESOLUTION_MODES_.NO_CHECK,
+        required: ['reason'],
+        validation: 'Use when no uncertain or mechanically relevant check is needed.'
+      }
+    ],
+    persistence: {
+      event_log: ['resolution_json', 'resolution_mode', 'resolution_outcome'],
+      scene_feed: ['resolution_json'],
+      visible_block_type: 'system'
+    },
+    source_of_truth: 'ECHO_WORKBOOK',
+    caller_rule: 'The caller supplies the structured resolution; Apps Script validates and persists it.'
+  };
+}
+
+function echoGetResolutionContract() {
+  return {
+    ok: true,
+    contract: echoResolutionContract_()
+  };
+}
+
 function echoSceneContract_() {
   return {
     version: ECHO_SCENE_CONTRACT_VERSION,
@@ -891,7 +1223,8 @@ function echoSceneContract_() {
 function echoGetSceneContract() {
   return {
     ok: true,
-    contract: echoSceneContract_()
+    contract: echoSceneContract_(),
+    resolution_contract: echoResolutionContract_()
   };
 }
 
@@ -1347,6 +1680,7 @@ function getOverlayState_() {
     sceneType: scene.scene_type || 'narrative',
     contentRating: scene.content_rating || '',
     intimacyMode: scene.intimacy_mode || '',
+    resolution: normalizeResolution_(scene.resolution_json),
     location: currentLocation,
     locationLabel: currentLocation,
     locationId: locationId,
@@ -1421,7 +1755,8 @@ function getOverlayState_() {
     mapRegions: mapRegions_(state, locationId),
     selectedMapRegion: mapRegionIdForLocation_(locationId),
     chapters: chaptersFrom_(state),
-    sceneContract: echoSceneContract_()
+    sceneContract: echoSceneContract_(),
+    resolutionContract: echoResolutionContract_()
   };
 }
 
@@ -2067,6 +2402,7 @@ function echoGetRuntimeContext() {
     preference_policy: authoritative.preferences.effectivePolicy,
     preference_coverage: authoritative.preferences.preferenceCoverage,
     scene_contract: echoSceneContract_(),
+    resolution_contract: echoResolutionContract_(),
     preferences: authoritative.preferences
   };
 }
@@ -2188,6 +2524,8 @@ function echoHandleGatewayRequest(request) {
       return echoGetRuntimeContext();
     case 'scene-contract':
       return echoGetSceneContract();
+    case 'resolution-contract':
+      return echoGetResolutionContract();
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
@@ -3469,12 +3807,12 @@ var ECHO_PHASE2_SCHEMA_ = {
     'event_id', 'run_id', 'sequence', 'timestamp', 'chat_id', 'event_type',
     'player_action', 'narrative_summary', 'state_changes_json', 'new_flags',
     'affected_entities', 'canonicality', 'source', 'reversible', 'notes',
-    'content_rating', 'intimacy_mode', 'turn_id', 'transaction_id',
+    'content_rating', 'intimacy_mode', 'resolution_json', 'resolution_mode', 'resolution_outcome', 'turn_id', 'transaction_id',
     'revision_id', 'committed_at', 'payload_fingerprint'
   ],
   SCENE_FEED: [
     'feed_id', 'run_id', 'sequence', 'event_id', 'scene_type', 'title',
-    'location_id', 'narrative_text', 'scene_blocks_json', 'scene_contract_version', 'mood',
+    'location_id', 'narrative_text', 'scene_blocks_json', 'scene_contract_version', 'resolution_json', 'mood',
     'visible_changes_json', 'available_actions_json', 'portraits_json',
     'map_delta_json', 'relationship_delta_json', 'status', 'content_rating',
     'intimacy_mode', 'scene_id', 'revision_id', 'revision_number',
@@ -4006,7 +4344,11 @@ function echoPhase2EffectiveSceneRows_(rows) {
 function echoPhase2AppendSceneRevision_(event, options) {
   options = options || {};
   var scene = event.scene || {};
+  var resolution = normalizeResolution_(event.resolution);
   var storageBlocks = sceneBlocksForStorage_(scene);
+  if (!isSceneCorrection_(event)) {
+    storageBlocks = sceneBlocksWithResolution_(storageBlocks, resolution);
+  }
   var sceneFeed = getSheet_(ECHO_CONFIG.sheets.sceneFeed);
   var revisionSheet = getSheet_(ECHO_CONFIG.sheets.sceneRevisions);
   var sceneEventId = String(options.sceneEventId || event.event_id || '');
@@ -4073,6 +4415,7 @@ function echoPhase2AppendSceneRevision_(event, options) {
     status: scene.status || 'PLAY',
     content_rating: scene.content_rating || event.content_rating || '',
     intimacy_mode: scene.intimacy_mode || event.intimacy_mode || '',
+    resolution_json: jsonString_(resolution),
     scene_id: sceneId || feedId,
     revision_id: revisionId,
     revision_number: revisionNumber,
@@ -4489,6 +4832,7 @@ function echoPhase2CommitPlan_(event, options) {
   var plan = existing.plan;
   var eventLogSheet = getSheet_(ECHO_CONFIG.sheets.eventLog);
   var sceneResult = null;
+  var resolution = normalizeResolution_(event.resolution);
 
   try {
     if (!transaction.event_logged_at) {
@@ -4512,6 +4856,9 @@ function echoPhase2CommitPlan_(event, options) {
           notes: event.notes || '',
           content_rating: event.content_rating || '',
           intimacy_mode: event.intimacy_mode || '',
+          resolution_json: jsonString_(resolution),
+          resolution_mode: resolution.mode || '',
+          resolution_outcome: resolution.outcome || '',
           turn_id: event.turn_id || '',
           transaction_id: transaction.transaction_id,
           revision_id: plan.revisionId || '',
