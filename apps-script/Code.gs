@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-4-state-projections-2026-08-27';
+var ECHO_BUILD_ID = 'phase-6-scene-readback-2026-08-27';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -38,6 +38,7 @@ var ECHO_RESOLUTION_CONTRACT_VERSION = '1.0.0';
 var ECHO_OVERLAY_CONTRACT_VERSION = '1.0.0';
 var ECHO_PROJECTION_CONTRACT_VERSION = '1.0.0';
 var ECHO_CONTEXT_BINDING_VERSION = '1.0.0';
+var ECHO_SCENE_READBACK_CONTRACT_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -164,6 +165,9 @@ function doGet(e) {
   }
   if (action === 'context-binding-contract') {
     return jsonOutput_(echoGetContextBindingContract());
+  }
+  if (action === 'scene-readback-contract') {
+    return jsonOutput_(echoGetSceneReadbackContract());
   }
   if (action === 'preferences') {
     return jsonOutput_(getEchoPreferenceContext_({ includeAudit: true }));
@@ -899,6 +903,94 @@ function validateSceneBlocks_(scene) {
   normalizeSceneBlocks_(raw, { strict: true });
 }
 
+
+function echoPhase6SceneReadback_(row, expected) {
+  row = row || {};
+  expected = expected || {};
+  var errors = [];
+
+  var feedId = String(row.feed_id || '').trim();
+  var expectedFeedId = String(expected.feedId || expected.feed_id || '').trim();
+  if (!feedId) errors.push('feed_id missing');
+  if (expectedFeedId && feedId !== expectedFeedId) errors.push('feed_id mismatch');
+
+  var eventId = String(row.event_id || '').trim();
+  var expectedEventId = String(expected.eventId || expected.event_id || '').trim();
+  if (expectedEventId && eventId !== expectedEventId) errors.push('event_id mismatch');
+
+  var revisionId = String(row.revision_id || '').trim();
+  var expectedRevisionId = String(expected.revisionId || expected.revision_id || '').trim();
+  if (expectedRevisionId && revisionId !== expectedRevisionId) errors.push('revision_id mismatch');
+
+  if (String(row.scene_contract_version || '').trim() !== ECHO_SCENE_CONTRACT_VERSION) {
+    errors.push('scene_contract_version mismatch');
+  }
+
+  var blocks = [];
+  try {
+    blocks = normalizeSceneBlocks_(row.scene_blocks_json, { strict: true });
+  } catch (error) {
+    errors.push(
+      'scene_blocks_json invalid: ' +
+      String(error && error.message ? error.message : error)
+    );
+  }
+
+  if (!blocks.length) errors.push('visible scene blocks missing');
+
+  var formatted = blocks.length ? sceneTextFromBlocks_(blocks, '') : '';
+  var narrativeText = String(row.narrative_text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!narrativeText) {
+    errors.push('narrative_text missing');
+  } else if (narrativeText !== formatted) {
+    errors.push('narrative_text does not match scene blocks');
+  }
+
+  return {
+    ok: errors.length === 0,
+    status: errors.length ? 'SCENE_READBACK_FAILED' : 'VERIFIED',
+    errors: errors,
+    feedId: feedId || null,
+    eventId: eventId || null,
+    sceneId: row.scene_id || row.feed_id || null,
+    revisionId: revisionId || null,
+    revisionNumber: Number(row.revision_number || 0),
+    blockCount: blocks.length,
+    formattedTextPresent: !!formatted
+  };
+}
+
+function echoPhase6AssertSceneReadback_(result, expected) {
+  result = result || {};
+  expected = expected || {};
+  var feedId = String(result.feed_id || result.ui_feed_id || '').trim();
+  if (!feedId) {
+    throw new Error('SCENE_READBACK_FAILED: ui_feed_id is missing.');
+  }
+
+  var row = findRow_(
+    getSheet_(ECHO_CONFIG.sheets.sceneFeed),
+    'feed_id',
+    feedId
+  );
+  var readback = echoPhase6SceneReadback_(row, {
+    feedId: feedId,
+    eventId: expected.eventId || expected.event_id || '',
+    revisionId: expected.revisionId || expected.revision_id || result.revision_id || ''
+  });
+
+  if (!readback.ok) {
+    throw new Error(
+      'SCENE_READBACK_FAILED: ' + readback.errors.join('; ')
+    );
+  }
+
+  return readback;
+}
+
 var ECHO_RESOLUTION_MODES_ = {
   ROLL: 'ROLL',
   NO_ROLL: 'NO_ROLL',
@@ -1338,6 +1430,28 @@ function echoGetContextBindingContract() {
   };
 }
 
+function echoSceneReadbackContract_() {
+  return {
+    version: ECHO_SCENE_READBACK_CONTRACT_VERSION,
+    source: 'SCENE_FEED',
+    verification: [
+      'feed_id and revision identifiers match the commit result',
+      'scene_blocks_json parses into at least one visible block',
+      'narrative_text is present and matches formatted block output',
+      'scene_contract_version matches the active scene contract'
+    ],
+    failure_status: 'SCENE_READBACK_FAILED',
+    commit_rule: 'A transaction is not reported as committed until readback succeeds.'
+  };
+}
+
+function echoGetSceneReadbackContract() {
+  return {
+    ok: true,
+    contract: echoSceneReadbackContract_()
+  };
+}
+
 function echoSceneContract_() {
   return {
     version: ECHO_SCENE_CONTRACT_VERSION,
@@ -1358,7 +1472,8 @@ function echoGetSceneContract() {
     contract: echoSceneContract_(),
     resolution_contract: echoResolutionContract_(),
     overlay_contract: echoOverlayContract_(),
-    projection_contract: echoProjectionContract_()
+    projection_contract: echoProjectionContract_(),
+    scene_readback_contract: echoSceneReadbackContract_()
   };
 }
 
@@ -2272,19 +2387,39 @@ function echoPhase5ContextBinding_(suppliedFingerprint, currentFingerprint) {
   };
 }
 
+function echoPhase5RecoveryMayContinue_(event, transaction) {
+  if (!transaction) return false;
+
+  var status = String(transaction.status || '').trim().toUpperCase();
+  if (status === 'COMMITTED') return true;
+  if (['PREPARED', 'APPLYING', 'RECOVERY_REQUIRED'].indexOf(status) === -1) return false;
+
+  var storedFingerprint = String(
+    transaction.payload_fingerprint ||
+    parseJson_(transaction.plan_json, {}).payloadFingerprint ||
+    ''
+  ).trim();
+  if (!storedFingerprint) return false;
+
+  return storedFingerprint === echoPhase2Fingerprint_(event);
+}
+
 function echoPhase5AssertContextBinding_(event, options, currentContext) {
   event = event || {};
   options = options || {};
   var context = currentContext || getEchoAuthoritativeContext_({ includePrivate: false });
   var supplied = options.submittedContextFingerprint || event.context_fingerprint || '';
   var binding = echoPhase5ContextBinding_(supplied, context.fingerprint);
+  var recoveryOverride = !binding.accepted &&
+    echoPhase5RecoveryMayContinue_(event, options.existingTransaction);
 
-  if (!binding.accepted) {
+  if (!binding.accepted && !recoveryOverride) {
     throw new Error(
       binding.status + ': context must be reread before this turn is committed.'
     );
   }
 
+  binding.recoveryOverride = recoveryOverride;
   return {
     context: context,
     binding: binding
@@ -3081,6 +3216,7 @@ function echoGetRuntimeContext() {
     overlay_contract: echoOverlayContract_(),
     projection_contract: echoProjectionContract_(),
     context_binding_contract: echoContextBindingContract_(),
+    scene_readback_contract: echoSceneReadbackContract_(),
     projections: authoritative.projections,
     preferences: authoritative.preferences
   };
@@ -3251,6 +3387,8 @@ function echoHandleGatewayRequest(request) {
       return echoGetProjectionContract();
     case 'context-binding-contract':
       return echoGetContextBindingContract();
+    case 'scene-readback-contract':
+      return echoGetSceneReadbackContract();
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
@@ -4876,6 +5014,7 @@ function getEchoAuthoritativeContext_(options) {
       projection_rule: 'Use the current workbook-backed projections; never invent missing facts or numeric relationship values.'
     },
     projection_contract: echoProjectionContract_(),
+    scene_readback_contract: echoSceneReadbackContract_(),
     projections: projections
   };
   context.fingerprint = echoPhase2Fingerprint_(context);
@@ -5553,7 +5692,11 @@ function echoPhase2CommitPlan_(event, options) {
   validatePhase2EventUpdates_(event);
 
   var context = getEchoAuthoritativeContext_({ includePrivate: false });
-  var contextBinding = echoPhase5AssertContextBinding_(event, options, context);
+  var existingTransaction = echoPhase2TransactionForEvent_(event.event_id);
+  var bindingOptions = Object.assign({}, options, {
+    existingTransaction: existingTransaction
+  });
+  var contextBinding = echoPhase5AssertContextBinding_(event, bindingOptions, context);
   var existing = echoPhase2StartTransaction_(event, {
     transactionId: options.transactionId || '',
     contextFingerprint: context.fingerprint
@@ -5663,6 +5806,10 @@ function echoPhase2CommitPlan_(event, options) {
     }
 
     updateStateKey_('save.last_event_id', event.event_id, 'event_id', 'save metadata', event.event_id, new Date());
+    var sceneReadback = echoPhase6AssertSceneReadback_(sceneResult, {
+      eventId: event.event_id,
+      revisionId: sceneResult.revision_id || transaction.revision_id || ''
+    });
     echoPhase2TransactionUpdate_(transaction.transaction_id, {
       status: 'COMMITTED',
       committed_at: new Date(),
@@ -5677,7 +5824,8 @@ function echoPhase2CommitPlan_(event, options) {
       transaction_id: transaction.transaction_id,
       event_id: event.event_id,
       ui_feed_id: sceneResult ? sceneResult.feed_id : (transaction.ui_feed_id || ''),
-      revision_id: sceneResult ? sceneResult.revision_id : (transaction.revision_id || '')
+      revision_id: sceneResult ? sceneResult.revision_id : (transaction.revision_id || ''),
+      readback: sceneReadback
     };
   } catch (error) {
     echoPhase2TransactionUpdate_(transaction.transaction_id, {
@@ -5698,7 +5846,11 @@ function commitSceneCorrectionCore_(event, options) {
   options = options || {};
   validateSceneCorrection_(event);
   echoPhase2EnsureSchema_();
-  var correctionContextBinding = echoPhase5AssertContextBinding_(event, options, null);
+  var existingCorrectionTransaction = echoPhase2TransactionForEvent_(event.event_id);
+  var correctionBindingOptions = Object.assign({}, options, {
+    existingTransaction: existingCorrectionTransaction
+  });
+  var correctionContextBinding = echoPhase5AssertContextBinding_(event, correctionBindingOptions, null);
 
   var turnInboxSheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
   var originalTurn = findRow_(
@@ -5776,6 +5928,10 @@ function commitSceneCorrectionCore_(event, options) {
       ui_feed_id: result.feed_id,
       revision_id: result.revision_id
     });
+    var correctionReadback = echoPhase6AssertSceneReadback_(result, {
+      eventId: originalEventId,
+      revisionId: result.revision_id
+    });
     echoPhase2TransactionUpdate_(transaction.transaction_id, {
       status: 'COMMITTED',
       committed_at: new Date(),
@@ -5791,7 +5947,8 @@ function commitSceneCorrectionCore_(event, options) {
       transaction_id: transaction.transaction_id,
       event_id: originalEventId,
       ui_feed_id: result.feed_id,
-      revision_id: result.revision_id
+      revision_id: result.revision_id,
+      readback: correctionReadback
     };
   } catch (error) {
     echoPhase2TransactionUpdate_(transaction.transaction_id, {
