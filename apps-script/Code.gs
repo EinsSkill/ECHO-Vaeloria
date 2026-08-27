@@ -3986,9 +3986,15 @@ function echoPhase2NormalizeItemPatch_(patch, fallbackId) {
     throw new Error('Unknown item owner_type: ' + ownerType);
   }
 
-  var status = String(patch.status || (ownerType === 'NONE' ? 'REMOVED' : 'ACTIVE')).toUpperCase();
+  var rawStatus = String(patch.status || (ownerType === 'NONE' ? 'REMOVED' : 'ACTIVE')).toUpperCase();
+  // Legacy STATE_SNAPSHOT inventory rows use CARRIED; ITEM_STATE uses
+  // ACTIVE for an item owned by an entity but not currently held.
+  var statusAliases = {
+    CARRIED: 'ACTIVE'
+  };
+  var status = statusAliases[rawStatus] || rawStatus;
   if (['ACTIVE', 'HELD', 'REMOVED', 'DESTROYED', 'LOST', 'CONFLICT', 'UNKNOWN'].indexOf(status) === -1) {
-    throw new Error('Unknown item status: ' + status);
+    throw new Error('Unknown item status: ' + rawStatus);
   }
 
   var metadata = patch.metadata_json !== undefined ? patch.metadata_json : patch.metadata;
