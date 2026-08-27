@@ -104,3 +104,15 @@ Phase 6 ergänzt den Readback-Schutz für Szenen:
 - GET?action=scene-readback-contract und die Gateway-Operation scene-readback-contract liefern den technischen Vertrag.
 
 Auch Phase 6 verändert keine privaten Tabellenwerte und benötigt keine zusätzliche Migration. Beim späteren Sammel-Import genügt weiterhin die konsolidierte apps-script/Code.gs.
+
+
+Phase 7 ergänzt den autoritativen Ereignis- und Zustandsabgleich:
+
+- Eine event_id bleibt an genau einen Payload gebunden; veränderte Wiederholungen werden als EVENT_PAYLOAD_CONFLICT abgelehnt.
+- Neue Payload-Fingerprints ignorieren nur die flüchtigen Kontextfelder; ältere Fingerprint-Daten bleiben kompatibel.
+- Vor COMMITTED werden EVENT_LOG, SCENE_FEED, SCENE_REVISIONS und – bei normalen Zügen – STATE_SNAPSHOT.save.last_event_id gegengeprüft.
+- Korrekturen behalten die Originalszene als Quelle und werden über eine eigene Revision nachvollziehbar.
+- Ein Widerspruch führt zu COMMIT_RECONCILIATION_FAILED und RECOVERY_REQUIRED; die Erfolgsmeldung bleibt gesperrt.
+- GET?action=commit-reconciliation-contract und die Gateway-Operation commit-reconciliation-contract liefern den technischen Vertrag.
+
+Auch Phase 7 verändert keine privaten Tabellenwerte und benötigt keine zusätzliche Migration. Beim späteren Sammel-Import genügt weiterhin die konsolidierte apps-script/Code.gs.
