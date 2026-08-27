@@ -1,8 +1,8 @@
-name: Phase 3B resolution foundation
+name: Phase 3C overlay delivery foundation
 
 on:
   push:
-    branches: [main, phase-3b-resolution-runtime]
+    branches: [main, phase-3c-overlay-delivery]
   pull_request:
     branches: [main]
 
@@ -26,3 +26,5 @@ jobs:
         run: node tests/phase-3-narrative-runtime.test.js
       - name: Run Phase 3B checks
         run: node tests/phase-3b-resolution-runtime.test.js
+      - name: Run Phase 3C checks
+        run: node tests/phase-3c-overlay-delivery.test.js
