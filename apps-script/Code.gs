@@ -2272,19 +2272,39 @@ function echoPhase5ContextBinding_(suppliedFingerprint, currentFingerprint) {
   };
 }
 
+function echoPhase5RecoveryMayContinue_(event, transaction) {
+  if (!transaction) return false;
+
+  var status = String(transaction.status || '').trim().toUpperCase();
+  if (status === 'COMMITTED') return true;
+  if (['PREPARED', 'APPLYING', 'RECOVERY_REQUIRED'].indexOf(status) === -1) return false;
+
+  var storedFingerprint = String(
+    transaction.payload_fingerprint ||
+    parseJson_(transaction.plan_json, {}).payloadFingerprint ||
+    ''
+  ).trim();
+  if (!storedFingerprint) return false;
+
+  return storedFingerprint === echoPhase2Fingerprint_(event);
+}
+
 function echoPhase5AssertContextBinding_(event, options, currentContext) {
   event = event || {};
   options = options || {};
   var context = currentContext || getEchoAuthoritativeContext_({ includePrivate: false });
   var supplied = options.submittedContextFingerprint || event.context_fingerprint || '';
   var binding = echoPhase5ContextBinding_(supplied, context.fingerprint);
+  var recoveryOverride = !binding.accepted &&
+    echoPhase5RecoveryMayContinue_(event, options.existingTransaction);
 
-  if (!binding.accepted) {
+  if (!binding.accepted && !recoveryOverride) {
     throw new Error(
       binding.status + ': context must be reread before this turn is committed.'
     );
   }
 
+  binding.recoveryOverride = recoveryOverride;
   return {
     context: context,
     binding: binding
@@ -5553,7 +5573,11 @@ function echoPhase2CommitPlan_(event, options) {
   validatePhase2EventUpdates_(event);
 
   var context = getEchoAuthoritativeContext_({ includePrivate: false });
-  var contextBinding = echoPhase5AssertContextBinding_(event, options, context);
+  var existingTransaction = echoPhase2TransactionForEvent_(event.event_id);
+  var bindingOptions = Object.assign({}, options, {
+    existingTransaction: existingTransaction
+  });
+  var contextBinding = echoPhase5AssertContextBinding_(event, bindingOptions, context);
   var existing = echoPhase2StartTransaction_(event, {
     transactionId: options.transactionId || '',
     contextFingerprint: context.fingerprint
@@ -5698,7 +5722,11 @@ function commitSceneCorrectionCore_(event, options) {
   options = options || {};
   validateSceneCorrection_(event);
   echoPhase2EnsureSchema_();
-  var correctionContextBinding = echoPhase5AssertContextBinding_(event, options, null);
+  var existingCorrectionTransaction = echoPhase2TransactionForEvent_(event.event_id);
+  var correctionBindingOptions = Object.assign({}, options, {
+    existingTransaction: existingCorrectionTransaction
+  });
+  var correctionContextBinding = echoPhase5AssertContextBinding_(event, correctionBindingOptions, null);
 
   var turnInboxSheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
   var originalTurn = findRow_(
