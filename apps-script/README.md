@@ -70,3 +70,14 @@ Die Trennung lautet damit: **Code öffentlich, Konfiguration und Spielzustand pr
 `setupEchoTrigger()` führt vor der Trigger-Erstellung auch `setupEchoSchema()` aus. Die Migration ergänzt ausschließlich fehlende Spalten für `respect`, `tension`, `safety`, `dominance`, `submission`, `consent_state`, `boundaries_json`, `intimacy_phase`, `intimacy_profile_json`, `teaching`, `content_rating` und `intimacy_mode`. Bestehende Werte werden nicht überschrieben.
 
 Die Beziehungsschicht kann damit Vertrauen, Verlangen, Angst, Respekt, Spannung und Sicherheitslage sowie eine freiwillige, pausierbare oder widerrufbare Nähe-Dynamik darstellen. Diese Metadaten sind keine Eingabe und erzeugen keine Zustimmung.
+
+Phase 4 ergänzt stabile, workbook-basierte Projektionen für Welt, Charaktere, Beziehungen und Gruppen:
+
+- context_version ist phase-4.
+- projection_contract beschreibt die stabilen Ausgabefelder und ihre Quellen.
+- Charaktereinträge werden aus Profil, Beziehung, Gruppenmitgliedschaft und charakterbezogenen Präferenzen über eine stabile Entity-ID zusammengeführt.
+- Aktive Gruppenmitgliedschaften werden deterministisch sortiert; LEFT, INACTIVE und PAUSED werden nicht als aktive Mitglieder projiziert.
+- Numerische Beziehungswerte kommen ausschließlich aus RELATIONSHIP_STATE. Profilwerte bleiben qualitative Profilinformationen; Unbekanntes wird nicht zu einer Zahl.
+- GET?action=projection-contract und die Gateway-Operation projection-contract liefern den technischen Vertrag.
+
+Phase 4 benötigt keine neue Migration und schreibt keine privaten Tabellenwerte in Git. Beim späteren Sammel-Import genügt weiterhin die konsolidierte apps-script/Code.gs.
