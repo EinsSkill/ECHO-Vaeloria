@@ -92,3 +92,15 @@ Phase 5 ergänzt die Kontextbindung für neue Spielzüge:
 - Der Vertrag ist unter GET?action=context-binding-contract und als Gateway-Operation context-binding-contract verfügbar.
 
 Auch Phase 5 verändert keine privaten Tabellenwerte und benötigt keine zusätzliche Migration.
+
+
+Phase 6 ergänzt den Readback-Schutz für Szenen:
+
+- Nach dem Schreiben wird der tatsächliche SCENE_FEED-Datensatz erneut gelesen.
+- feed_id, event_id, Revision, scene_contract_version, sichtbare scene_blocks_json und die formatierte narrative_text-Repräsentation müssen zusammenpassen.
+- Erst nach erfolgreichem Readback wird die Transaktion auf COMMITTED gesetzt und die Chat-Bestätigung freigegeben.
+- Bei einer Abweichung entsteht SCENE_READBACK_FAILED und die Transaktion bleibt RECOVERY_REQUIRED.
+- Der vollständige Szenentext bleibt ausschließlich im Overlay; der Readback liefert nur Status und technische Metadaten.
+- GET?action=scene-readback-contract und die Gateway-Operation scene-readback-contract liefern den technischen Vertrag.
+
+Auch Phase 6 verändert keine privaten Tabellenwerte und benötigt keine zusätzliche Migration. Beim späteren Sammel-Import genügt weiterhin die konsolidierte apps-script/Code.gs.
