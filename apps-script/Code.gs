@@ -20,13 +20,18 @@ var ECHO_CONFIG = {
     relationships: 'RELATIONSHIP_STATE',
     threads: 'THREADS',
     preferences: 'ECHO_PREFERENCE_PROFILE',
-    characterProfiles: 'ECHO_CHARACTER_PROFILES'
+    characterProfiles: 'ECHO_CHARACTER_PROFILES',
+    transactions: 'TURN_TRANSACTIONS',
+    sceneRevisions: 'SCENE_REVISIONS',
+    groupMembers: 'GROUP_MEMBERS',
+    items: 'ITEM_STATE'
   }
 };
 
 
-var ECHO_BUILD_ID = 'phase-1-foundation-2026-08-27';
-var ECHO_STATE_MODEL_VERSION = '2.2.0';
+var ECHO_BUILD_ID = 'phase-2-transactional-state-2026-08-27';
+var ECHO_STATE_MODEL_VERSION = '3.0.0';
+var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
 
 var ECHO_STATE_ALIAS_TO_CANONICAL_ = {
@@ -102,6 +107,10 @@ function doGet(e) {
   }
   if (action === 'preferences') {
     return jsonOutput_(echoGetPreferenceContext_({ includeAudit: true }));
+  }
+  if (action === 'context') {
+    requireApiKey_(e && e.parameter ? e.parameter.token : '');
+    return jsonOutput_(echoGetAuthoritativeContext_({ includePrivate: true }));
   }
   if (action === 'validate-preferences') {
     return jsonOutput_(echoValidatePreferenceProfile());
@@ -197,7 +206,7 @@ function processTurnInbox() {
 // ECHO turn contract and inbox boundary.
 // This module is public and secret-free. Live state remains in the private sheet.
 
-var ECHO_CONTRACT_VERSION = '2.1.0';
+var ECHO_CONTRACT_VERSION = '3.0.0';
 
 var ECHO_RELATIONSHIP_NUMERIC_FIELDS = {
   trust: true,
@@ -267,6 +276,7 @@ function validateEventShape_(event) {
   if (event.character_profile_updates !== undefined) {
     validateCharacterProfileUpdates_(event.character_profile_updates);
   }
+  validatePhase2EventUpdates_(event);
 
   Object.keys(event.relationship_updates).forEach(function (stateId) {
     normalizeRelationshipPatch_(event.relationship_updates[stateId] || {}, stateId);
@@ -428,6 +438,7 @@ function findSceneFeedId_(eventId) {
 }
 
 function setupEchoSchema() {
+  var phase2 = echoPhase2EnsureSchema_();
   ensurePreferenceSheets_();
   ensureHeaders_(ECHO_CONFIG.sheets.relationships, [
     'respect', 'tension', 'safety', 'dominance', 'submission',
@@ -436,7 +447,11 @@ function setupEchoSchema() {
   ]);
   ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode']);
   ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'scene_blocks_json']);
-  return { ok: true, message: 'ECHO-Schema geprüft und fehlende Spalten ergänzt.' };
+  return {
+    ok: true,
+    phase2: phase2,
+    message: 'ECHO-Schema geprüft; Phase-2-Projektionstabellen wurden rückwärtskompatibel vorbereitet.'
+  };
 }
 
 function ensureHeaders_(sheetName, requiredHeaders) {
@@ -777,218 +792,134 @@ function validateSceneCorrection_(event) {
 }
 
 function commitSceneCorrection_(event) {
-  validateSceneCorrection_(event);
-
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    var turnInboxSheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
-    var originalTurn = findRow_(
-      turnInboxSheet,
-      'turn_id',
-      event.correction_for_turn_id
-    );
-    if (!originalTurn) {
-      throw new Error(
-        'Correction target turn not found: ' + event.correction_for_turn_id
-      );
-    }
-
-    var originalEventId = String(originalTurn.commit_event_id || '').trim();
-    var sceneFeedSheet = getSheet_(ECHO_CONFIG.sheets.sceneFeed);
-    var targetScene = originalTurn.ui_feed_id
-      ? findRow_(sceneFeedSheet, 'feed_id', originalTurn.ui_feed_id)
-      : null;
-    if (!targetScene && originalEventId) {
-      targetScene = findRow_(sceneFeedSheet, 'event_id', originalEventId);
-    }
-    if (!targetScene || !targetScene.__rowNumber) {
-      throw new Error(
-        'Correction target scene not found for turn: ' + event.correction_for_turn_id
-      );
-    }
-    if (originalEventId && String(targetScene.event_id || '') !== originalEventId) {
-      throw new Error('Correction target event mismatch');
-    }
-    if (!hasHeader_(sceneFeedSheet, 'narrative_text')) {
-      throw new Error('Missing scene column: narrative_text');
-    }
-
-    [
-      'scene_type',
-      'title',
-      'location_id',
-      'narrative_text',
-      'mood',
-      'visible_changes_json',
-      'available_actions_json',
-      'portraits_json',
-      'map_delta_json',
-      'relationship_delta_json',
-      'scene_blocks_json',
-      'status',
-      'content_rating',
-      'intimacy_mode'
-    ].forEach(function (key) {
-      if (event.scene[key] !== undefined && event.scene[key] !== null) {
-        var value = key === 'narrative_text'
-          ? sceneTextForCorrection_(event)
-          : event.scene[key];
-        setCellByHeader_(sceneFeedSheet, targetScene.__rowNumber, key, value);
-      }
-    });
-
-    return {
-      ok: true,
-      correction: true,
-      event_id: String(targetScene.event_id || originalEventId),
-      ui_feed_id: String(targetScene.feed_id || originalTurn.ui_feed_id || '')
-    };
+    echoPhase2EnsureSchema_();
+    return commitSceneCorrectionCore_(event, {});
   } finally {
     lock.releaseLock();
   }
 }
 
 function processTurnInbox_() {
-  var sheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
-  var table = readTable_(sheet);
-  if (!table.rows.length) return { processed: 0 };
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
 
-  var processed = 0;
-  table.rows.forEach(function(row) {
-    var status = String(row.validation_status || '').toUpperCase();
-    var retryableCorrection = status === 'ERROR' &&
-      !String(row.processed_at || '').trim() &&
-      isSceneCorrectionRow_(row);
-    if (['PENDING', 'READY'].indexOf(status) === -1 && !retryableCorrection) return;
+  try {
+    echoPhase2EnsureSchema_();
+    echoPhase2RecoverTransactions_();
 
-    try {
-      if (!row.raw_input || !row.parsed_intent_json) {
-        throw new Error('raw_input and parsed_intent_json are required');
+    var sheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
+    var table = readTable_(sheet);
+    if (!table.rows.length) return { processed: 0, recovered: 0 };
+
+    var processed = 0;
+    var recovered = 0;
+
+    table.rows.forEach(function (row) {
+      var status = String(row.validation_status || '').toUpperCase();
+      var processingAge = stateTimestamp_(row.locked_at || row.processed_at || row.received_at);
+      var staleProcessing = status === 'PROCESSING' &&
+        processingAge > 0 &&
+        new Date().getTime() - processingAge > 5 * 60 * 1000;
+
+      if (status === 'PROCESSING' && !staleProcessing) return;
+      if (staleProcessing) {
+        status = 'RECOVERY_REQUIRED';
+        recovered += 1;
       }
 
-      var intent = parseJsonValue_(row.parsed_intent_json);
-      if (!intent || typeof intent !== 'object') throw new Error('parsed_intent_json is not an object');
-      var event = intent.event || intent;
-      event.turn_id = event.turn_id || row.turn_id;
-      event.chat_id = event.chat_id || row.chat_id;
-      event.raw_input = event.raw_input || row.raw_input;
-      event.event_id = event.event_id || ('EVT-' + String(row.turn_id || Utilities.getUuid()).replace(/[^A-Za-z0-9_-]/g, ''));
+      var retryableCorrection = status === 'ERROR' &&
+        !String(row.processed_at || '').trim() &&
+        isSceneCorrectionRow_(row);
 
-      var result;
-      if (isSceneCorrection_(event)) {
-        result = commitSceneCorrection_(event);
-      } else {
-        validateEventShape_(event);
-        result = commitTurn_(event, { skipInboxAppend: true });
+      if (['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(status) === -1 && !retryableCorrection) {
+        return;
       }
+
+      var eventIdForRecovery = String(row.commit_event_id || '').trim();
+      var attempt = Number(row.attempt_count || 0) + 1;
+      var token = 'PROC-' + Utilities.getUuid();
       updateTurnInboxRow_(row.__rowNumber, {
-        validation_status: 'COMMITTED',
-        commit_event_id: result.event_id,
-        ui_feed_id: result.ui_feed_id || '',
-        error_code: '',
-        processed_at: new Date()
+        validation_status: 'PROCESSING',
+        processing_token: token,
+        attempt_count: attempt,
+        locked_at: new Date(),
+        error_code: ''
       });
-      processed += 1;
-    } catch (error) {
-      updateTurnInboxRow_(row.__rowNumber, {
-        validation_status: 'ERROR',
-        error_code: String(error && error.message ? error.message : error),
-        processed_at: new Date()
-      });
-    }
-  });
-  return { processed: processed };
+
+      try {
+        if (!row.raw_input || !row.parsed_intent_json) {
+          throw new Error('raw_input and parsed_intent_json are required');
+        }
+
+        var intent = parseJsonValue_(row.parsed_intent_json);
+        if (!intent || typeof intent !== 'object') {
+          throw new Error('parsed_intent_json is not an object');
+        }
+
+        var event = intent.event || intent;
+        event.turn_id = event.turn_id || row.turn_id;
+        event.chat_id = event.chat_id || row.chat_id;
+        event.raw_input = event.raw_input || row.raw_input;
+        event.event_id = event.event_id ||
+          ('EVT-' + String(row.turn_id || Utilities.getUuid()).replace(/[^A-Za-z0-9_-]/g, ''));
+        eventIdForRecovery = String(event.event_id || '');
+
+        var result;
+        if (isSceneCorrection_(event)) {
+          result = commitSceneCorrectionCore_(event, {
+            transactionId: row.transaction_id || ''
+          });
+        } else {
+          validateEventShape_(event);
+          result = commitTurnCore_(event, {
+            skipInboxAppend: true,
+            transactionId: row.transaction_id || ''
+          });
+        }
+
+        updateTurnInboxRow_(row.__rowNumber, {
+          validation_status: 'COMMITTED',
+          processing_token: '',
+          locked_at: '',
+          transaction_id: result.transaction_id || row.transaction_id || '',
+          commit_event_id: result.event_id,
+          ui_feed_id: result.ui_feed_id || '',
+          error_code: '',
+          processed_at: new Date()
+        });
+        processed += 1;
+      } catch (error) {
+        var transaction = echoPhase2TransactionForEvent_(eventIdForRecovery || row.commit_event_id || '');
+        var recoverable = transaction &&
+          ['PREPARED', 'APPLYING', 'RECOVERY_REQUIRED'].indexOf(
+            String(transaction.status || '').toUpperCase()
+          ) !== -1;
+
+        updateTurnInboxRow_(row.__rowNumber, {
+          validation_status: recoverable ? 'RECOVERY_REQUIRED' : 'ERROR',
+          processing_token: '',
+          locked_at: '',
+          error_code: String(error && error.message ? error.message : error),
+          processed_at: recoverable ? '' : new Date()
+        });
+      }
+    });
+
+    return { processed: processed, recovered: recovered };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function commitTurn_(event, options) {
-  options = options || {};
-  validateEventShape_(event);
-
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    var eventLogSheet = getSheet_(ECHO_CONFIG.sheets.eventLog);
-    var sceneFeedSheet = getSheet_(ECHO_CONFIG.sheets.sceneFeed);
-    validateRelationshipTargets_(event.relationship_updates || {});
-    var uiFeedId = event.scene.feed_id || ('SCENE-' + event.event_id);
-    var existingFeed = findRow_(sceneFeedSheet, 'feed_id', uiFeedId);
-    if (existingFeed && String(existingFeed.event_id || '') !== String(event.event_id)) {
-      throw new Error('feed_id is already bound to another event: ' + uiFeedId);
-    }
-
-    var existing = findRow_(eventLogSheet, 'event_id', event.event_id);
-    if (existing) {
-      return { ok: true, duplicate: true, event_id: event.event_id, ui_feed_id: findSceneFeedId_(event.event_id) };
-    }
-
-    var now = new Date();
-    var sequence = nextSequence_(eventLogSheet, 'sequence');
-    var eventRow = {
-      event_id: event.event_id,
-      run_id: event.run_id || 'PROTO-SAVE-001',
-      sequence: sequence,
-      timestamp: now,
-      chat_id: event.chat_id || 'ECHO-PROJECT',
-      event_type: event.event_type || 'PLAYER_ACTION',
-      player_action: event.player_action,
-      narrative_summary: event.narrative_summary,
-      state_changes_json: jsonString_(event.state_updates || {}),
-      new_flags: jsonString_(event.new_flags || []),
-      affected_entities: jsonString_(event.affected_entities || []),
-      canonicality: event.canonicality || 'PLAY',
-      source: event.source || 'ECHO_CHATGPT',
-      reversible: event.reversible === undefined ? 'TRUE' : String(event.reversible),
-      notes: event.notes || '',
-      content_rating: event.content_rating || '',
-      intimacy_mode: event.intimacy_mode || ''
-    };
-    appendObject_(eventLogSheet, eventRow);
-
-    if (event.scene) {
-      var sceneRow = {
-        feed_id: uiFeedId,
-        run_id: event.scene.run_id || event.run_id || 'PROTO-SAVE-001',
-        sequence: event.scene.sequence === undefined ? sequence : event.scene.sequence,
-        event_id: event.event_id,
-        scene_type: event.scene.scene_type || 'narrative',
-        title: event.scene.title || 'Neue Szene',
-        location_id: event.scene.location_id || stateValue_(getStateMap_(), 'player.location_id') || 'PRISON_CITY',
-        narrative_text: event.scene.narrative_text || event.narrative_summary,
-        scene_blocks_json: jsonString_(event.scene.scene_blocks_json || event.scene.blocks_json || event.scene.blocks || []),
-        mood: event.scene.mood || 'mysteriös / wandelnd',
-        visible_changes_json: jsonString_(event.scene.visible_changes_json || {}),
-        available_actions_json: jsonString_(event.scene.available_actions_json || []),
-        portraits_json: jsonString_(event.scene.portraits_json || {}),
-        map_delta_json: jsonString_(event.scene.map_delta_json || {}),
-        relationship_delta_json: jsonString_(event.scene.relationship_delta_json || {}),
-        status: event.scene.status || 'PLAY',
-        content_rating: event.scene.content_rating || event.content_rating || '',
-        intimacy_mode: event.scene.intimacy_mode || event.intimacy_mode || ''
-      };
-      appendObject_(sceneFeedSheet, sceneRow);
-    }
-
-    applyStateUpdates_(event.state_updates || {}, event.event_id, now);
-    applyRelationshipUpdates_(event.relationship_updates || {}, event.event_id, now);
-    applyPreferenceUpdates_(event.preference_updates || null, event.event_id, now);
-    applyCharacterProfileUpdates_(event.character_profile_updates || null, event.event_id, now);
-    if (!options.skipInboxAppend) {
-      appendObject_(getSheet_(ECHO_CONFIG.sheets.turnInbox), {
-        turn_id: event.turn_id || ('TURN-' + event.event_id),
-        chat_id: event.chat_id || 'ECHO-PROJECT',
-        received_at: now,
-        raw_input: event.raw_input || event.player_action,
-        parsed_intent_json: jsonString_(event.parsed_intent || event),
-        validation_status: 'COMMITTED',
-        commit_event_id: event.event_id,
-        ui_feed_id: uiFeedId,
-        error_code: '',
-        processed_at: now
-      });
-    }
-    updateStateKey_('save.last_event_id', event.event_id, 'event_id', 'save metadata', event.event_id, now);
-    return { ok: true, duplicate: false, event_id: event.event_id, ui_feed_id: uiFeedId };
+    echoPhase2EnsureSchema_();
+    return commitTurnCore_(event, options || {});
   } finally {
     lock.releaseLock();
   }
@@ -1065,6 +996,11 @@ function applyStateUpdates_(updates, eventId, now) {
       case 'condition_duration_scenes':
         conditionDuration = numericValue_(value, null);
         break;
+      case 'item_updates':
+      case 'group_member_updates':
+      case 'group_updates':
+        // Phase 2 has dedicated normalized projections for these updates.
+        break;
       default:
         updateStateKey_(key, value, valueType_(value), 'runtime state', eventId, now);
     }
@@ -1105,7 +1041,15 @@ function applyRelationshipUpdates_(updates, eventId, now) {
 function updateStateKey_(key, value, valueType, scope, eventId, now) {
   key = canonicalStateKey_(key);
   var sheet = getSheet_(ECHO_CONFIG.sheets.state);
-  var row = findRow_(sheet, 'state_key', key);
+  var rows = readTable_(sheet).rows.filter(function (candidate) {
+    return String(candidate.state_key || '').trim() === key &&
+      !isLegacyStateKey_(candidate.state_key);
+  });
+  var row = null;
+  rows.forEach(function (candidate) {
+    if (recordIsNewer_(candidate, row)) row = candidate;
+  });
+
   var formatted = serializeValue_(value);
   if (row && row.__rowNumber) {
     setCellByHeader_(sheet, row.__rowNumber, 'value', formatted);
@@ -1114,6 +1058,7 @@ function updateStateKey_(key, value, valueType, scope, eventId, now) {
     setCellByHeader_(sheet, row.__rowNumber, 'updated_at', now || new Date());
     return;
   }
+
   appendObject_(sheet, {
     state_key: key,
     value: formatted,
@@ -1121,7 +1066,8 @@ function updateStateKey_(key, value, valueType, scope, eventId, now) {
     scope: scope || 'runtime state',
     source: 'ECHO_CHATGPT',
     last_event_id: eventId || '',
-    updated_at: now || new Date()
+    updated_at: now || new Date(),
+    record_status: 'CURRENT'
   });
 }
 
@@ -1233,7 +1179,7 @@ function getOverlayState_() {
   var threadRows = readOverlayRows_(ECHO_CONFIG.sheets.threads, overlayWarnings);
   var preferenceContext = getEchoPreferenceContext_({ includeAudit: false });
 
-  var playableScenes = sceneRows.filter(isPlayableScene_);
+  var playableScenes = echoPhase2EffectiveSceneRows_(sceneRows.filter(isPlayableScene_));
   var scene = latestBySequence_(playableScenes) || {};
   var events = eventRows.filter(function (row) { return row.event_id; }).slice().sort(sequenceAscending_);
   var latestEvent = events.length ? events[events.length - 1] : null;
@@ -1314,8 +1260,9 @@ function getOverlayState_() {
       clockLabel: 'Weltuhr: ' + (stateValue_(state, 'world.clock') || 'unbekannt') + ' · pausiert zwischen Zügen.'
     },
     knownFacts: parseList_(stateValue_(state, 'player.known_facts'), []),
-    inventory: inventoryFrom_(stateValue_(state, 'player.inventory')),
+    inventory: itemOwnership.inventory || inventoryFrom_(stateValue_(state, 'player.inventory')),
     itemOwnership: itemOwnership.items,
+    groupMembers: echoPhase2GroupMembersForContext_(overlayWarnings),
     relationships: echoRelationshipOverlays_(relationshipRows, preferenceContext.characters),
 
     relationshipProfiles: preferenceContext.characters
@@ -1689,6 +1636,17 @@ function inventoryContainsItem_(inventory, itemId) {
 }
 
 function itemOwnershipProjection_(state, warnings) {
+  warnings = warnings || [];
+  var normalized = echoPhase2ItemProjection_(warnings);
+  if (normalized.available && normalized.hasRows) {
+    return {
+      playerHeldItem: normalized.playerHeldItem,
+      items: normalized.items,
+      inventory: normalized.inventory,
+      source: 'ITEM_STATE'
+    };
+  }
+
   var inventory = parseList_(stateValue_(state, 'player.inventory'), []);
   var owners = {};
 
@@ -1704,8 +1662,6 @@ function itemOwnershipProjection_(state, warnings) {
         item_id: id,
         message: 'Mehrere Besitzer für denselben Gegenstand: ' + id
       });
-      // A future ITEM_STATE row will become authoritative. Until then the
-      // first confirmed projection remains visible and the conflict is explicit.
       return;
     }
     owners[id] = existing || {
@@ -1745,7 +1701,9 @@ function itemOwnershipProjection_(state, warnings) {
 
   return {
     playerHeldItem: projectedPlayerHeld ? projectedPlayerHeld.itemId : '',
-    items: items
+    items: items,
+    inventory: inventoryFrom_(stateValue_(state, 'player.inventory')),
+    source: 'STATE_SNAPSHOT'
   };
 }
 
@@ -1882,87 +1840,57 @@ function echoMasteryValue_(raw) {
 
 function echoGetDiagnostics_() {
   var preference = validateEchoPreferenceStorage_({ repair: false });
+  var schema = echoPhase2SchemaStatus_();
   return {
-    ok: preference.ok,
+    ok: preference.ok && schema.ready,
     build: ECHO_BUILD_ID,
     state_model_version: ECHO_STATE_MODEL_VERSION,
+    transaction_model_version: ECHO_TRANSACTION_MODEL_VERSION,
     preference_policy_version: ECHO_PREFERENCE_POLICY_VERSION,
+    phase2_schema: schema,
     preference_coverage: preference.preferenceCoverage,
     errors: preference.errors,
-    warnings: preference.warnings
+    warnings: preference.warnings.concat(schema.warnings || [])
   };
 }
 
-// ===== Fast Turn Gateway =====
-
-// ECHO – Fast Turn Gateway
-// Public, secret-free reference implementation.
-// Live spreadsheet IDs, deployment URLs and tokens belong in Script Properties.
-
-const ECHO_FAST_GATEWAY_VERSION = '1.2.0';
-
-const ECHO_FAST_DEFAULT_RUNTIME_KEYS = [
-  'save.last_event_id',
-  'player.location_id',
-  'player.known_identity',
-  'player.health',
-  'player.health_max',
-  'player.resonance_stage',
-  'player.memory_state',
-  'player.posture',
-  'player.equipment_main_hand',
-  'player.held_item',
-  'player.clothing_state',
-  'player.seal_threshold_state',
-  'player.inventory',
-  'player.known_facts',
-  'player.conditions',
-  'player.echo_mastery_profile',
-  'player.active_relationships',
-  'world.clock',
-  'world.elapsed_minutes',
-  'world.known_regions',
-  'story.chapter_id',
-  'story.chapter_label'
-];
-
-/** Compact canonical context for resolving the next player turn. */
 function echoGetRuntimeContext() {
-  const ss = echoFastSpreadsheet_();
-  const inbox = echoFastRequireSheet_(ss, 'TURN_INBOX');
-  const snapshot = echoFastRequireSheet_(ss, 'STATE_SNAPSHOT');
-  const lastTurn = echoFastReadLatestInboxRow_(inbox);
-  const state = echoFastReadSnapshotMap_(snapshot);
-  const compact = {};
+  var ss = echoFastSpreadsheet_();
+  var inbox = echoFastRequireSheet_(ss, 'TURN_INBOX');
+  var snapshot = echoFastRequireSheet_(ss, 'STATE_SNAPSHOT');
+  var lastTurn = echoFastReadLatestInboxRow_(inbox);
+  var state = echoFastReadSnapshotMap_(snapshot);
+  var compact = {};
 
   echoFastRuntimeKeys_().forEach(function (key) {
     if (Object.prototype.hasOwnProperty.call(state, key)) compact[key] = state[key];
   });
 
-  const preferences = getEchoPreferenceContext_({ includeAudit: true });
+  var authoritative = getEchoAuthoritativeContext_({ includePrivate: true });
 
   return {
     ok: true,
     version: ECHO_FAST_GATEWAY_VERSION,
     build: ECHO_BUILD_ID,
-    context_version: 'phase-1',
+    context_version: 'phase-2',
     state_model_version: ECHO_STATE_MODEL_VERSION,
+    transaction_model_version: ECHO_TRANSACTION_MODEL_VERSION,
+    source_of_truth: 'ECHO_WORKBOOK',
+    read_before_every_turn: true,
+    revalidated_at_commit: true,
     commit_ready: !lastTurn || lastTurn.validation_status === 'COMMITTED',
     last_turn: lastTurn,
     snapshot: compact,
     authority: ECHO_AUTHORITY_ORDER_.slice(),
+    canonical_context: authoritative,
+    context_fingerprint: authoritative.fingerprint,
     chat_delivery: echoChatDeliveryPolicy_(),
-    preference_policy: preferences.effectivePolicy,
-    preference_coverage: preferences.preferenceCoverage,
-    preferences: preferences
+    preference_policy: authoritative.preferences.effectivePolicy,
+    preference_coverage: authoritative.preferences.preferenceCoverage,
+    preferences: authoritative.preferences
   };
 }
 
-/**
- * Atomically appends one new PENDING turn to TURN_INBOX.
- * Idempotent by turn_id and refuses a dependent turn while the latest turn
- * is not COMMITTED.
- */
 function echoSubmitTurn(turn) {
   const normalized = echoFastNormalizeTurn_(turn);
   const lock = LockService.getScriptLock();
@@ -2029,6 +1957,12 @@ function echoSubmitTurn(turn) {
     ]]);
 
     SpreadsheetApp.flush();
+    if (normalized.context_fingerprint) {
+      setCellByHeader_(inbox, targetRow, 'context_fingerprint', normalized.context_fingerprint);
+    }
+    if (normalized.context_read_at) {
+      setCellByHeader_(inbox, targetRow, 'context_read_at', normalized.context_read_at);
+    }
 
     // Processor may already have changed PENDING to COMMITTED/ERROR.
     const written = echoFastReadInboxRow_(inbox, targetRow);
@@ -2065,11 +1999,13 @@ function echoGetTurnStatus(turnId) {
 
 /** Router for an optional Web App or future custom connector. */
 function echoHandleGatewayRequest(request) {
-  const body = request || {};
+  var body = request || {};
   echoFastAssertGatewayToken_(body.token);
 
   switch (body.op) {
-    case 'context': return echoGetRuntimeContext();
+    case 'context':
+    case 'canonical-context':
+      return echoGetRuntimeContext();
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
@@ -2077,7 +2013,6 @@ function echoHandleGatewayRequest(request) {
     default: throw new Error('Unsupported gateway operation.');
   }
 }
-
 
 function echoGetChatDeliveryPolicy() {
   return {
@@ -2118,24 +2053,40 @@ function echoFastInboxRowIsLater_(candidate, current) {
 }
 
 function echoFastReadInboxRow_(sheet, row) {
-  const v = sheet.getRange(row, 1, 1, 10).getValues()[0];
-  let parsed = null;
+  var values = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(function (value) {
+    return String(value || '').trim();
+  });
+  var parsed = null;
 
-  if (v[4]) {
-    try { parsed = typeof v[4] === 'string' ? JSON.parse(v[4]) : v[4]; }
-    catch (err) { parsed = null; }
+  var field = function (name) {
+    var index = headers.indexOf(name);
+    return index === -1 ? '' : values[index];
+  };
+
+  if (field('parsed_intent_json')) {
+    try {
+      var raw = field('parsed_intent_json');
+      parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (err) {
+      parsed = null;
+    }
   }
 
   return {
     row: row,
-    turn_id: echoFastJsonValue_(v[0]),
-    chat_id: echoFastJsonValue_(v[1]),
-    received_at: echoFastJsonValue_(v[2]),
-    validation_status: echoFastJsonValue_(v[5]),
-    commit_event_id: echoFastJsonValue_(v[6]),
-    ui_feed_id: echoFastJsonValue_(v[7]),
-    error_code: echoFastJsonValue_(v[8]),
-    processed_at: echoFastJsonValue_(v[9]),
+    turn_id: echoFastJsonValue_(field('turn_id')),
+    chat_id: echoFastJsonValue_(field('chat_id')),
+    received_at: echoFastJsonValue_(field('received_at')),
+    validation_status: echoFastJsonValue_(field('validation_status')),
+    commit_event_id: echoFastJsonValue_(field('commit_event_id')),
+    ui_feed_id: echoFastJsonValue_(field('ui_feed_id')),
+    error_code: echoFastJsonValue_(field('error_code')),
+    processed_at: echoFastJsonValue_(field('processed_at')),
+    processing_token: echoFastJsonValue_(field('processing_token')),
+    attempt_count: echoFastJsonValue_(field('attempt_count')),
+    transaction_id: echoFastJsonValue_(field('transaction_id')),
+    context_fingerprint: echoFastJsonValue_(field('context_fingerprint')),
     event_id: parsed && parsed.event_id ? parsed.event_id : null,
     scene_feed_id: parsed && parsed.scene && parsed.scene.feed_id ? parsed.scene.feed_id : null
   };
@@ -2230,10 +2181,10 @@ function echoFastFindTurnRow_(sheet, turnId) {
 function echoFastNormalizeTurn_(turn) {
   if (!turn || typeof turn !== 'object') throw new Error('turn must be an object.');
 
-  const status = String(turn.validation_status || 'PENDING').trim();
+  var status = String(turn.validation_status || 'PENDING').trim();
   if (status !== 'PENDING') throw new Error('New turns must enter TURN_INBOX as PENDING.');
 
-  let parsed = turn.parsed_intent_json;
+  var parsed = turn.parsed_intent_json;
   if (typeof parsed === 'string') {
     try { parsed = JSON.parse(parsed); }
     catch (err) { throw new Error('parsed_intent_json is not valid JSON.'); }
@@ -2247,7 +2198,9 @@ function echoFastNormalizeTurn_(turn) {
     received_at: echoFastRequiredString_(turn.received_at, 'received_at'),
     raw_input: echoFastRequiredString_(turn.raw_input, 'raw_input'),
     parsed_intent_json: JSON.stringify(parsed),
-    validation_status: 'PENDING'
+    validation_status: 'PENDING',
+    context_fingerprint: String(turn.context_fingerprint || ''),
+    context_read_at: String(turn.context_read_at || '')
   };
 }
 
@@ -3315,5 +3268,1258 @@ function echoRelationshipOverlays_(rows, profiles) {
   });
 
   return result;
+}
+
+
+
+// ===== Phase 2: workbook authority, resumable transactions and projections =====
+
+var ECHO_PHASE2_SCHEMA_VERSION = '1.0.0';
+
+var ECHO_PHASE2_SCHEMA_ = {
+  TURN_INBOX: [
+    'turn_id', 'chat_id', 'received_at', 'raw_input', 'parsed_intent_json',
+    'validation_status', 'commit_event_id', 'ui_feed_id', 'error_code',
+    'processed_at', 'processing_token', 'attempt_count', 'transaction_id',
+    'locked_at', 'context_fingerprint', 'context_read_at'
+  ],
+  EVENT_LOG: [
+    'event_id', 'run_id', 'sequence', 'timestamp', 'chat_id', 'event_type',
+    'player_action', 'narrative_summary', 'state_changes_json', 'new_flags',
+    'affected_entities', 'canonicality', 'source', 'reversible', 'notes',
+    'content_rating', 'intimacy_mode', 'turn_id', 'transaction_id',
+    'revision_id', 'committed_at', 'payload_fingerprint'
+  ],
+  SCENE_FEED: [
+    'feed_id', 'run_id', 'sequence', 'event_id', 'scene_type', 'title',
+    'location_id', 'narrative_text', 'scene_blocks_json', 'mood',
+    'visible_changes_json', 'available_actions_json', 'portraits_json',
+    'map_delta_json', 'relationship_delta_json', 'status', 'content_rating',
+    'intimacy_mode', 'scene_id', 'revision_id', 'revision_number',
+    'supersedes_feed_id', 'is_current', 'transaction_id', 'created_at'
+  ],
+  SCENE_REVISIONS: [
+    'revision_id', 'scene_id', 'feed_id', 'revision_number', 'event_id',
+    'source_event_id', 'turn_id', 'source_feed_id', 'supersedes_feed_id',
+    'reason', 'created_at', 'transaction_id', 'payload_fingerprint'
+  ],
+  TURN_TRANSACTIONS: [
+    'transaction_id', 'turn_id', 'event_id', 'status', 'created_at',
+    'updated_at', 'attempt', 'payload_fingerprint', 'plan_json',
+    'event_logged_at', 'scene_revision_at', 'state_applied_at',
+    'relationships_applied_at', 'items_applied_at', 'group_members_applied_at',
+    'preferences_applied_at', 'profiles_applied_at', 'committed_at',
+    'error_code', 'recovery_action', 'context_fingerprint', 'ui_feed_id',
+    'revision_id'
+  ],
+  ITEM_STATE: [
+    'item_id', 'display_name', 'item_type', 'owner_type', 'owner_id',
+    'location_id', 'status', 'metadata_json', 'last_event_id', 'updated_at',
+    'source', 'revision'
+  ],
+  GROUP_MEMBERS: [
+    'member_id', 'group_id', 'entity_id', 'display_name', 'role', 'status',
+    'joined_at', 'left_at', 'position', 'traits_json', 'boundaries_json',
+    'last_event_id', 'updated_at', 'source'
+  ],
+  RELATIONSHIP_STATE: [
+    'state_id', 'entity_a', 'entity_b', 'trust', 'desire', 'respect', 'fear',
+    'intimacy', 'power_gap', 'dependence', 'agency', 'resentment',
+    'consent_profile', 'status', 'last_event_id', 'notes', 'tension', 'safety',
+    'dominance', 'submission', 'consent_state', 'boundaries_json',
+    'intimacy_phase', 'intimacy_profile_json', 'teaching', 'updated_at',
+    'transaction_id'
+  ]
+};
+
+function echoPhase2GetOrCreateSheet_(name) {
+  var ss = echoSpreadsheet_();
+  var sheet = ss.getSheetByName(name);
+  return sheet || ss.insertSheet(name);
+}
+
+function echoPhase2EnsureHeadersOnSheet_(sheet, requiredHeaders) {
+  var lastColumn = sheet.getLastColumn();
+  var headers = lastColumn
+    ? sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0].map(function (value) {
+        return String(value || '').trim();
+      })
+    : [];
+
+  if (!headers.length || headers.every(function (header) { return !header; })) {
+    sheet.getRange(1, 1, 1, requiredHeaders.length).setValues([requiredHeaders]);
+    return requiredHeaders.length;
+  }
+
+  var missing = requiredHeaders.filter(function (header) {
+    return headers.indexOf(header) === -1;
+  });
+  if (missing.length) {
+    sheet.getRange(1, headers.length + 1, 1, missing.length).setValues([missing]);
+  }
+  return missing.length;
+}
+
+function echoPhase2EnsureSchema_() {
+  var created = [];
+  var addedHeaders = {};
+  Object.keys(ECHO_PHASE2_SCHEMA_).forEach(function (sheetName) {
+    var sheet = echoSpreadsheet_().getSheetByName(sheetName);
+    if (!sheet) {
+      sheet = echoPhase2GetOrCreateSheet_(sheetName);
+      created.push(sheetName);
+    }
+    addedHeaders[sheetName] = echoPhase2EnsureHeadersOnSheet_(
+      sheet,
+      ECHO_PHASE2_SCHEMA_[sheetName]
+    );
+  });
+  return {
+    version: ECHO_PHASE2_SCHEMA_VERSION,
+    ready: true,
+    created: created,
+    addedHeaders: addedHeaders
+  };
+}
+
+function echoPhase2SchemaStatus_() {
+  var warnings = [];
+  var sheets = {};
+  var ready = true;
+  var ss = echoSpreadsheet_();
+
+  Object.keys(ECHO_PHASE2_SCHEMA_).forEach(function (sheetName) {
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) {
+      ready = false;
+      sheets[sheetName] = { present: false, missing: ECHO_PHASE2_SCHEMA_[sheetName].slice() };
+      return;
+    }
+
+    var lastColumn = sheet.getLastColumn();
+    var headers = lastColumn
+      ? sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0].map(function (value) {
+          return String(value || '').trim();
+        })
+      : [];
+    var missing = ECHO_PHASE2_SCHEMA_[sheetName].filter(function (header) {
+      return headers.indexOf(header) === -1;
+    });
+    if (missing.length) ready = false;
+    sheets[sheetName] = { present: true, missing: missing };
+  });
+
+  if (!ready) warnings.push('Phase-2-Schema noch nicht vollständig migriert.');
+  return {
+    version: ECHO_PHASE2_SCHEMA_VERSION,
+    ready: ready,
+    sheets: sheets,
+    warnings: warnings
+  };
+}
+
+function echoPhase2StripRow_(row) {
+  var output = {};
+  Object.keys(row || {}).forEach(function (key) {
+    if (key !== '__rowNumber') output[key] = row[key];
+  });
+  return output;
+}
+
+function echoPhase2Rows_(sheetName, warnings, options) {
+  options = options || {};
+  try {
+    var rows = readTable_(getSheet_(sheetName)).rows;
+    if (options.statuses) {
+      rows = rows.filter(function (row) {
+        return options.statuses.indexOf(String(row.status || '').toUpperCase()) !== -1;
+      });
+    }
+    return rows.map(echoPhase2StripRow_);
+  } catch (error) {
+    if (warnings) {
+      warnings.push({
+        code: 'CONTEXT_SOURCE_UNAVAILABLE',
+        sheet: sheetName,
+        message: String(error && error.message ? error.message : error)
+      });
+    }
+    return [];
+  }
+}
+
+function echoPhase2LockedRows_(sheetName, warnings) {
+  try {
+    var rows = readTable_(getSheet_(sheetName)).rows;
+    return rows
+      .filter(function (row) {
+        var status = String(row.status || '').trim().toUpperCase();
+        return !status || status === 'LOCKED';
+      })
+      .map(echoPhase2StripRow_);
+  } catch (error) {
+    if (warnings) {
+      warnings.push({
+        code: 'CONTEXT_SOURCE_UNAVAILABLE',
+        sheet: sheetName,
+        message: String(error && error.message ? error.message : error)
+      });
+    }
+    return [];
+  }
+}
+
+function echoPhase2ActiveRows_(sheetName, warnings) {
+  try {
+    var rows = readTable_(getSheet_(sheetName)).rows;
+    return rows
+      .filter(function (row) {
+        var status = String(row.status || '').trim().toUpperCase();
+        return !status || ['ACTIVE', 'OPEN', 'CURRENT', 'PLAY', 'NEGOTIATED', 'LOCKED', 'UNINITIALIZED'].indexOf(status) !== -1;
+      })
+      .map(echoPhase2StripRow_);
+  } catch (error) {
+    if (warnings) {
+      warnings.push({
+        code: 'CONTEXT_SOURCE_UNAVAILABLE',
+        sheet: sheetName,
+        message: String(error && error.message ? error.message : error)
+      });
+    }
+    return [];
+  }
+}
+
+function echoPhase2Fingerprint_(value) {
+  var serialized = jsonString_(value);
+  try {
+    var digest = Utilities.computeDigest(
+      Utilities.DigestAlgorithm.SHA_256,
+      serialized,
+      Utilities.Charset.UTF_8
+    );
+    return Utilities.base64Encode(digest).replace(/=+$/, '');
+  } catch (error) {
+    return 'UNHASHED-' + serialized.length;
+  }
+}
+
+function echoPhase2RecentRows_(rows, comparator, limit) {
+  return (rows || []).slice().sort(comparator).slice(-limit);
+}
+
+function echoPhase2GroupMembersForContext_(warnings) {
+  return echoPhase2ActiveRows_(ECHO_CONFIG.sheets.groupMembers, warnings);
+}
+
+function getEchoAuthoritativeContext_(options) {
+  options = options || {};
+  var warnings = [];
+  var stateRows = echoPhase2Rows_(ECHO_CONFIG.sheets.state, warnings);
+  var state = {};
+  try {
+    state = getStateMap_();
+  } catch (error) {
+    warnings.push({
+      code: 'CONTEXT_STATE_UNAVAILABLE',
+      message: String(error && error.message ? error.message : error)
+    });
+  }
+
+  var eventRows = echoPhase2Rows_(ECHO_CONFIG.sheets.eventLog, warnings);
+  var sceneRows = echoPhase2Rows_(ECHO_CONFIG.sheets.sceneFeed, warnings);
+  var playableScenes = echoPhase2EffectiveSceneRows_(sceneRows.filter(isPlayableScene_));
+  var relationshipRows = echoPhase2ActiveRows_(ECHO_CONFIG.sheets.relationships, warnings);
+  var threadRows = echoPhase2ActiveRows_(ECHO_CONFIG.sheets.threads, warnings);
+  var groupMembers = echoPhase2ActiveRows_(ECHO_CONFIG.sheets.groupMembers, warnings);
+  var itemRows = echoPhase2Rows_(ECHO_CONFIG.sheets.items, warnings);
+  var preferenceContext = getEchoPreferenceContext_({ includeAudit: !!options.includePrivate });
+
+  var canonical = {
+    canon: echoPhase2LockedRows_('CANON', warnings),
+    decisions: echoPhase2LockedRows_('DECISIONS', warnings),
+    rules: echoPhase2Rows_('RULES', warnings),
+    echo_system: echoPhase2LockedRows_('ECHO_SYSTEM', warnings),
+    world: echoPhase2LockedRows_('WORLD', warnings),
+    timeline: echoPhase2LockedRows_('TIMELINE', warnings),
+    characters: echoPhase2LockedRows_('CHARACTERS', warnings),
+    species: echoPhase2LockedRows_('SPECIES', warnings),
+    factions: echoPhase2LockedRows_('FACTIONS', warnings),
+    relationships: echoPhase2LockedRows_('RELATIONSHIPS', warnings),
+    flags: echoPhase2LockedRows_('FLAGS', warnings),
+    player_experience: echoPhase2LockedRows_('PLAYER_EXPERIENCE', warnings),
+    game_design: echoPhase2LockedRows_('GAME_DESIGN', warnings),
+    ui_design: echoPhase2Rows_('UI_DESIGN', warnings)
+  };
+
+  var recentEvents = echoPhase2RecentRows_(
+    eventRows.filter(function (row) { return !!row.event_id; }),
+    sequenceAscending_,
+    12
+  );
+  var recentScenes = echoPhase2RecentRows_(
+    playableScenes,
+    sequenceAscending_,
+    12
+  );
+  var currentScene = latestBySequence_(playableScenes) || {};
+  var openQuestions = echoPhase2Rows_('OPEN_QUESTIONS', warnings, { statuses: ['OPEN', 'ACTIVE'] });
+
+  var context = {
+    context_version: 'phase-2',
+    source_of_truth: 'ECHO_WORKBOOK',
+    source_sheets: [
+      'CANON', 'DECISIONS', 'RULES', 'ECHO_SYSTEM', 'WORLD', 'TIMELINE',
+      'CHARACTERS', 'SPECIES', 'FACTIONS', 'RELATIONSHIPS', 'FLAGS',
+      'PLAYER_EXPERIENCE', 'GAME_DESIGN', 'UI_DESIGN', 'STATE_SNAPSHOT',
+      'EVENT_LOG', 'SCENE_FEED', 'RELATIONSHIP_STATE', 'THREADS',
+      'ECHO_PREFERENCE_PROFILE', 'ECHO_CHARACTER_PROFILES', 'ITEM_STATE',
+      'GROUP_MEMBERS'
+    ],
+    read_before_every_turn: true,
+    revalidated_at_commit: true,
+    authority: ECHO_AUTHORITY_ORDER_.slice(),
+    canonical: canonical,
+    current: {
+      state_snapshot: stateRows,
+      state_map: state,
+      relationship_state: relationshipRows,
+      character_profiles: echoPhase2Rows_(ECHO_CONFIG.sheets.characterProfiles, warnings),
+      preferences: preferenceContext,
+      items: itemRows,
+      group_members: groupMembers,
+      threads: threadRows
+    },
+    narrative: {
+      current_scene: echoPhase2StripRow_(currentScene),
+      recent_scenes: recentScenes,
+      recent_events: recentEvents,
+      open_questions: openQuestions
+    },
+    preferences: preferenceContext,
+    unknowns: {
+      open_questions: openQuestions,
+      active_threads: threadRows
+    },
+    consistency: {
+      warnings: warnings,
+      schema: echoPhase2SchemaStatus_()
+    },
+    contract: {
+      canonical_truth_rule: 'Only LOCKED canonical rows and committed runtime state are facts.',
+      unknown_fact_rule: 'Unknown remains unknown until an event commits it.',
+      preference_rule: 'Preferences guide presentation and open direction; they do not rewrite canon or create numeric relationship stats.',
+      player_agency: true,
+      npc_autonomy: true,
+      consent_required: true,
+      stop_word: 'Stopp',
+      write_boundary: 'TURN_INBOX',
+      narrative_destination: 'SCENE_FEED',
+      chat_acknowledgement: 'Übertragen. only after commit and readback.'
+    }
+  };
+  context.fingerprint = echoPhase2Fingerprint_(context);
+  return context;
+}
+
+function echoPhase2TransactionForEvent_(eventId) {
+  if (!eventId) return null;
+  try {
+    var rows = readTable_(getSheet_(ECHO_CONFIG.sheets.transactions)).rows;
+    var matches = rows.filter(function (row) {
+      return String(row.event_id || '') === String(eventId);
+    });
+    return matches.length ? matches[matches.length - 1] : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function echoPhase2TransactionUpdate_(transactionId, patch) {
+  var sheet = getSheet_(ECHO_CONFIG.sheets.transactions);
+  var row = findRow_(sheet, 'transaction_id', transactionId);
+  if (!row || !row.__rowNumber) throw new Error('Transaction not found: ' + transactionId);
+  Object.keys(patch || {}).forEach(function (key) {
+    setCellByHeader_(sheet, row.__rowNumber, key, patch[key]);
+  });
+}
+
+function echoPhase2TransactionStage_(transaction, stage, patch) {
+  var now = new Date();
+  var update = patch || {};
+  update.updated_at = now;
+  update[stage + '_at'] = now;
+  echoPhase2TransactionUpdate_(transaction.transaction_id, update);
+  transaction.updated_at = now;
+  transaction[stage + '_at'] = now;
+  Object.keys(update).forEach(function (key) {
+    transaction[key] = update[key];
+  });
+}
+
+function echoPhase2TransactionId_(eventId, supplied) {
+  if (supplied) return String(supplied);
+  return 'TXN-' + String(eventId || Utilities.getUuid())
+    .replace(/[^A-Za-z0-9_-]/g, '')
+    .slice(0, 70);
+}
+
+function echoPhase2PlanForEvent_(event, options) {
+  options = options || {};
+  var scene = event.scene || {};
+  var sceneId = String(options.sceneId || scene.scene_id || scene.base_scene_id || scene.feed_id || '').trim();
+  var sceneRows = [];
+  try {
+    sceneRows = readTable_(getSheet_(ECHO_CONFIG.sheets.sceneFeed)).rows.filter(isPlayableScene_);
+  } catch (error) {
+    sceneRows = [];
+  }
+  var previous = echoPhase2LatestSceneRevision_(sceneRows, sceneId);
+  var revisionNumber = Number(options.revisionNumber || scene.revision_number);
+  if (!isFinite(revisionNumber) || revisionNumber < 1) {
+    revisionNumber = previous ? echoPhase2SceneRevisionNumber_(previous) + 1 : 1;
+  }
+  var revisionId = String(options.revisionId || scene.revision_id || (
+    'REV-' + String(event.event_id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) + '-R' + revisionNumber
+  ));
+  var feedId = String(options.feedId || scene.feed_id || ('SCENE-' + event.event_id));
+  return {
+    sequence: Number(options.sequence || scene.sequence || nextSequence_(getSheet_(ECHO_CONFIG.sheets.eventLog), 'sequence')),
+    sceneId: sceneId || feedId,
+    feedId: feedId,
+    revisionId: revisionId,
+    revisionNumber: revisionNumber,
+    supersedesFeedId: previous ? String(previous.feed_id || '') : '',
+    payloadFingerprint: echoPhase2Fingerprint_(event)
+  };
+}
+
+function echoPhase2StartTransaction_(event, options) {
+  options = options || {};
+  var sheet = getSheet_(ECHO_CONFIG.sheets.transactions);
+  var existing = echoPhase2TransactionForEvent_(event.event_id);
+  if (existing && String(existing.status || '').toUpperCase() === 'COMMITTED') {
+    return {
+      transaction: existing,
+      plan: parseJson_(existing.plan_json, {}),
+      duplicate: true
+    };
+  }
+
+  var plan = existing ? parseJson_(existing.plan_json, null) : null;
+  if (!plan || !plan.sequence) {
+    plan = options.plan || echoPhase2PlanForEvent_(event, options);
+    plan.contextFingerprint = options.contextFingerprint || '';
+    plan.turnId = event.turn_id || '';
+  }
+
+  var transactionId = echoPhase2TransactionId_(event.event_id, options.transactionId || (existing && existing.transaction_id));
+  var now = new Date();
+  if (!existing) {
+    appendObject_(sheet, {
+      transaction_id: transactionId,
+      turn_id: event.turn_id || '',
+      event_id: event.event_id,
+      status: 'PREPARED',
+      created_at: now,
+      updated_at: now,
+      attempt: 1,
+      payload_fingerprint: plan.payloadFingerprint || echoPhase2Fingerprint_(event),
+      plan_json: jsonString_(plan),
+      error_code: '',
+      recovery_action: '',
+      context_fingerprint: options.contextFingerprint || '',
+      ui_feed_id: '',
+      revision_id: plan.revisionId || ''
+    });
+    existing = echoPhase2TransactionForEvent_(event.event_id);
+  }
+  if (!existing) throw new Error('Transaction journal could not be created.');
+
+  echoPhase2TransactionUpdate_(transactionId, {
+    status: 'APPLYING',
+    updated_at: now,
+    attempt: Number(existing.attempt || 0) + (existing.status === 'PREPARED' ? 0 : 1),
+    error_code: '',
+    recovery_action: ''
+  });
+
+  existing.transaction_id = transactionId;
+  existing.status = 'APPLYING';
+  existing.plan_json = jsonString_(plan);
+  existing.context_fingerprint = options.contextFingerprint || existing.context_fingerprint || '';
+  existing.revision_id = plan.revisionId || existing.revision_id || '';
+  return { transaction: existing, plan: plan, duplicate: false };
+}
+
+function echoPhase2RecoverTransactions_() {
+  var sheet = getSheet_(ECHO_CONFIG.sheets.transactions);
+  var now = new Date().getTime();
+  readTable_(sheet).rows.forEach(function (transaction) {
+    var status = String(transaction.status || '').toUpperCase();
+    if (['PREPARED', 'APPLYING', 'RECOVERY_REQUIRED'].indexOf(status) === -1) return;
+    var updated = stateTimestamp_(transaction.updated_at || transaction.created_at);
+    if (!updated || now - updated < 5 * 60 * 1000) return;
+
+    echoPhase2TransactionUpdate_(transaction.transaction_id, {
+      status: 'RECOVERY_REQUIRED',
+      recovery_action: 'retry_from_processor',
+      updated_at: new Date()
+    });
+
+    var inbox = findRow_(getSheet_(ECHO_CONFIG.sheets.turnInbox), 'turn_id', transaction.turn_id);
+    if (inbox && String(inbox.validation_status || '').toUpperCase() !== 'COMMITTED') {
+      updateTurnInboxRow_(inbox.__rowNumber, {
+        validation_status: 'RECOVERY_REQUIRED',
+        transaction_id: transaction.transaction_id,
+        processed_at: '',
+        error_code: transaction.error_code || 'Transaction requires recovery.'
+      });
+    }
+  });
+}
+
+function echoPhase2SceneRevisionNumber_(row) {
+  var number = Number(row && row.revision_number);
+  return isFinite(number) && number > 0 ? number : 1;
+}
+
+function echoPhase2SceneKey_(row) {
+  return String(row && (row.scene_id || row.feed_id) || '').trim();
+}
+
+function echoPhase2SceneIsLater_(candidate, current) {
+  if (!current) return true;
+  var revisionDiff = echoPhase2SceneRevisionNumber_(candidate) - echoPhase2SceneRevisionNumber_(current);
+  if (revisionDiff) return revisionDiff > 0;
+  var sequenceDiff = Number(candidate.sequence || 0) - Number(current.sequence || 0);
+  if (sequenceDiff) return sequenceDiff > 0;
+  var timeDiff = stateTimestamp_(candidate.created_at || candidate.updated_at || candidate.timestamp) -
+    stateTimestamp_(current.created_at || current.updated_at || current.timestamp);
+  if (timeDiff) return timeDiff > 0;
+  return Number(candidate.__rowNumber || 0) > Number(current.__rowNumber || 0);
+}
+
+function echoPhase2LatestSceneRevision_(rows, sceneId) {
+  var candidates = (rows || []).filter(function (row) {
+    return echoPhase2SceneKey_(row) === String(sceneId || '').trim();
+  });
+  var latest = null;
+  candidates.forEach(function (row) {
+    if (echoPhase2SceneIsLater_(row, latest)) latest = row;
+  });
+  return latest;
+}
+
+function echoPhase2EffectiveSceneRows_(rows) {
+  var latest = {};
+  (rows || []).forEach(function (row) {
+    var key = echoPhase2SceneKey_(row);
+    if (!key) return;
+    if (echoPhase2SceneIsLater_(row, latest[key])) latest[key] = row;
+  });
+  return Object.keys(latest).map(function (key) { return latest[key]; });
+}
+
+function echoPhase2AppendSceneRevision_(event, options) {
+  options = options || {};
+  var scene = event.scene || {};
+  var sceneFeed = getSheet_(ECHO_CONFIG.sheets.sceneFeed);
+  var revisionSheet = getSheet_(ECHO_CONFIG.sheets.sceneRevisions);
+  var sceneEventId = String(options.sceneEventId || event.event_id || '');
+  var existingForEvent = findRow_(sceneFeed, 'event_id', sceneEventId);
+
+  if (existingForEvent && !options.forceNewRevision && !existingForEvent.revision_id) {
+    return {
+      feed_id: String(existingForEvent.feed_id || ''),
+      scene_id: String(existingForEvent.scene_id || existingForEvent.feed_id || ''),
+      revision_id: '',
+      revision_number: 1,
+      duplicate: true
+    };
+  }
+
+  var sceneId = String(options.sceneId || scene.scene_id || scene.base_scene_id || scene.feed_id || '').trim();
+  var currentRows = readTable_(sceneFeed).rows.filter(isPlayableScene_);
+  var previous = echoPhase2LatestSceneRevision_(currentRows, sceneId);
+  var revisionNumber = Number(options.revisionNumber || scene.revision_number);
+  if (!isFinite(revisionNumber) || revisionNumber < 1) {
+    revisionNumber = previous ? echoPhase2SceneRevisionNumber_(previous) + 1 : 1;
+  }
+
+  var revisionId = String(options.revisionId || scene.revision_id || (
+    'REV-' + String(event.event_id || Utilities.getUuid()).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) + '-R' + revisionNumber
+  ));
+  var feedId = String(options.feedId || scene.feed_id || ('SCENE-' + event.event_id));
+  var feedRow = findRow_(sceneFeed, 'feed_id', feedId);
+  if (feedRow && String(feedRow.revision_id || '') !== revisionId) {
+    feedId = feedId + '-REV-' + String(revisionNumber);
+    feedRow = findRow_(sceneFeed, 'feed_id', feedId);
+  }
+
+  if (feedRow && String(feedRow.revision_id || '') === revisionId) {
+    return {
+      feed_id: String(feedRow.feed_id || feedId),
+      scene_id: String(feedRow.scene_id || sceneId || feedId),
+      revision_id: revisionId,
+      revision_number: echoPhase2SceneRevisionNumber_(feedRow),
+      duplicate: true
+    };
+  }
+
+  var now = new Date();
+  var row = {
+    feed_id: feedId,
+    run_id: scene.run_id || event.run_id || 'PROTO-SAVE-001',
+    sequence: scene.sequence === undefined ? (options.sequence || nextSequence_(getSheet_(ECHO_CONFIG.sheets.eventLog), 'sequence')) : scene.sequence,
+    event_id: sceneEventId,
+    scene_type: scene.scene_type || 'narrative',
+    title: scene.title || 'Neue Szene',
+    location_id: scene.location_id || stateValue_(getStateMap_(), 'player.location_id') || 'UNKNOWN_LOCATION',
+    narrative_text: options.narrativeText !== undefined ? options.narrativeText : (scene.narrative_text || event.narrative_summary || ''),
+    scene_blocks_json: jsonString_(scene.scene_blocks_json || scene.blocks_json || scene.blocks || []),
+    mood: scene.mood || 'unbestimmt',
+    visible_changes_json: jsonString_(scene.visible_changes_json || {}),
+    available_actions_json: jsonString_(scene.available_actions_json || []),
+    portraits_json: jsonString_(scene.portraits_json || {}),
+    map_delta_json: jsonString_(scene.map_delta_json || {}),
+    relationship_delta_json: jsonString_(scene.relationship_delta_json || {}),
+    status: scene.status || 'PLAY',
+    content_rating: scene.content_rating || event.content_rating || '',
+    intimacy_mode: scene.intimacy_mode || event.intimacy_mode || '',
+    scene_id: sceneId || feedId,
+    revision_id: revisionId,
+    revision_number: revisionNumber,
+    supersedes_feed_id: options.supersedesFeedId !== undefined
+      ? options.supersedesFeedId
+      : (previous ? previous.feed_id : ''),
+    is_current: 'TRUE',
+    transaction_id: options.transactionId || '',
+    created_at: now
+  };
+  appendObject_(sceneFeed, row);
+
+  var revisionExisting = findRow_(revisionSheet, 'revision_id', revisionId);
+  if (!revisionExisting) {
+    appendObject_(revisionSheet, {
+      revision_id: revisionId,
+      scene_id: row.scene_id,
+      feed_id: row.feed_id,
+      revision_number: revisionNumber,
+      event_id: options.correctionEventId || sceneEventId,
+      source_event_id: sceneEventId,
+      turn_id: event.turn_id || '',
+      source_feed_id: options.sourceFeedId || (previous ? previous.feed_id : ''),
+      supersedes_feed_id: row.supersedes_feed_id || '',
+      reason: options.reason || 'NEW_SCENE',
+      created_at: now,
+      transaction_id: options.transactionId || '',
+      payload_fingerprint: options.payloadFingerprint || echoPhase2Fingerprint_(event)
+    });
+  }
+
+  return {
+    feed_id: feedId,
+    scene_id: row.scene_id,
+    revision_id: revisionId,
+    revision_number: revisionNumber,
+    duplicate: false
+  };
+}
+
+function echoPhase2NormalizeItemUpdates_(updates) {
+  if (!updates) return [];
+  if (Array.isArray(updates)) return updates.slice();
+  if (updates.item_id || updates.id) return [updates];
+
+  return Object.keys(updates).map(function (itemId) {
+    var patch = updates[itemId] && typeof updates[itemId] === 'object'
+      ? Object.assign({}, updates[itemId])
+      : {};
+    patch.item_id = patch.item_id || patch.id || itemId;
+    return patch;
+  });
+}
+
+function echoPhase2NormalizeItemPatch_(patch, fallbackId) {
+  patch = patch || {};
+  var itemId = String(patch.item_id || patch.id || fallbackId || '').trim();
+  if (!itemId) throw new Error('item_updates requires item_id.');
+
+  var ownerType = String(patch.owner_type || '').toUpperCase();
+  var ownerId = String(patch.owner_id || '').trim();
+  if (!ownerType) ownerType = ownerId === 'PLAYER' ? 'PLAYER' : (ownerId ? 'CHARACTER' : 'UNKNOWN');
+  if (['PLAYER', 'CHARACTER', 'GROUP', 'LOCATION', 'NONE', 'UNKNOWN'].indexOf(ownerType) === -1) {
+    throw new Error('Unknown item owner_type: ' + ownerType);
+  }
+
+  var status = String(patch.status || (ownerType === 'NONE' ? 'REMOVED' : 'ACTIVE')).toUpperCase();
+  if (['ACTIVE', 'HELD', 'REMOVED', 'DESTROYED', 'LOST', 'CONFLICT', 'UNKNOWN'].indexOf(status) === -1) {
+    throw new Error('Unknown item status: ' + status);
+  }
+
+  var metadata = patch.metadata_json !== undefined ? patch.metadata_json : patch.metadata;
+  if (metadata !== undefined && typeof metadata !== 'string') metadata = JSON.stringify(metadata);
+  if (metadata === undefined) metadata = '{}';
+
+  return {
+    item_id: itemId,
+    display_name: patch.display_name || patch.name || patch.label || itemId,
+    item_type: patch.item_type || patch.type || '',
+    owner_type: ownerType,
+    owner_id: ownerId,
+    location_id: patch.location_id || '',
+    status: status,
+    metadata_json: metadata,
+    source: patch.source || 'ECHO_EVENT'
+  };
+}
+
+function echoPhase2ItemList_(value) {
+  if (Array.isArray(value)) return value;
+  return parseList_(value, []);
+}
+
+function echoPhase2FindItemRow_(sheet, itemId) {
+  return findRow_(sheet, 'item_id', itemId);
+}
+
+function echoPhase2UpsertItem_(sheet, patch, eventId, now) {
+  var row = echoPhase2FindItemRow_(sheet, patch.item_id);
+  if (!row) {
+    appendObject_(sheet, {
+      item_id: patch.item_id,
+      display_name: patch.display_name,
+      item_type: patch.item_type,
+      owner_type: patch.owner_type,
+      owner_id: patch.owner_id,
+      location_id: patch.location_id,
+      status: patch.status,
+      metadata_json: patch.metadata_json,
+      last_event_id: eventId || '',
+      updated_at: now || new Date(),
+      source: patch.source || 'ECHO_EVENT',
+      revision: 1
+    });
+    return;
+  }
+
+  var nextRevision = Number(row.revision || 0) + 1;
+  var update = Object.assign({}, patch, {
+    last_event_id: eventId || row.last_event_id || '',
+    updated_at: now || new Date(),
+    revision: nextRevision
+  });
+  Object.keys(update).forEach(function (key) {
+    setCellByHeader_(sheet, row.__rowNumber, key, update[key]);
+  });
+}
+
+function echoPhase2ApplyItemStateUpdates_(event, eventId, now) {
+  var sheet = getSheet_(ECHO_CONFIG.sheets.items);
+  var stateUpdates = event.state_updates || {};
+  var patches = echoPhase2NormalizeItemUpdates_(
+    event.item_updates || stateUpdates.item_updates
+  );
+
+  var fullInventory = stateUpdates['player.inventory'] !== undefined
+    ? stateUpdates['player.inventory']
+    : stateUpdates.inventory;
+  var inventoryItems = fullInventory === undefined ? null : echoPhase2ItemList_(fullInventory);
+  if (inventoryItems) {
+    inventoryItems.forEach(function (item) {
+      var identity = normalizedItemIdentity_(item);
+      patches.push(echoPhase2NormalizeItemPatch_(
+        typeof item === 'object'
+          ? Object.assign({}, item, { owner_type: 'PLAYER', owner_id: 'PLAYER' })
+          : { item_id: item, display_name: item, owner_type: 'PLAYER', owner_id: 'PLAYER' },
+        identity
+      ));
+    });
+  }
+
+  var added = echoPhase2ItemList_(stateUpdates.inventory_added);
+  added.forEach(function (item) {
+    patches.push(echoPhase2NormalizeItemPatch_(
+      typeof item === 'object'
+        ? Object.assign({}, item, { owner_type: 'PLAYER', owner_id: 'PLAYER' })
+        : { item_id: item, display_name: item, owner_type: 'PLAYER', owner_id: 'PLAYER' },
+      normalizedItemIdentity_(item)
+    ));
+  });
+
+  var removed = echoPhase2ItemList_(stateUpdates.inventory_removed);
+  removed.forEach(function (item) {
+    var id = normalizedItemIdentity_(item);
+    if (id) patches.push(echoPhase2NormalizeItemPatch_({
+      item_id: id,
+      owner_type: 'NONE',
+      owner_id: '',
+      status: 'REMOVED',
+      source: 'ECHO_EVENT'
+    }, id));
+  });
+
+  var held = stateUpdates['player.held_item'] !== undefined
+    ? stateUpdates['player.held_item']
+    : stateUpdates.held_item;
+  var heldId = normalizedItemIdentity_(held);
+  if (heldId && inventoryItems && inventoryItems.some(function (item) {
+    return normalizedItemIdentity_(item) === heldId;
+  })) {
+    patches.push(echoPhase2NormalizeItemPatch_({
+      item_id: heldId,
+      owner_type: 'PLAYER',
+      owner_id: 'PLAYER',
+      status: 'HELD',
+      source: 'ECHO_EVENT'
+    }, heldId));
+  }
+
+  var byId = {};
+  patches.forEach(function (rawPatch) {
+    var patch = echoPhase2NormalizeItemPatch_(rawPatch, normalizedItemIdentity_(rawPatch));
+    if (patch.item_id) byId[patch.item_id] = patch;
+  });
+  Object.keys(byId).forEach(function (itemId) {
+    echoPhase2UpsertItem_(sheet, byId[itemId], eventId, now);
+  });
+}
+
+function echoPhase2ItemProjection_(warnings) {
+  warnings = warnings || [];
+  var sheet;
+  try {
+    sheet = getSheet_(ECHO_CONFIG.sheets.items);
+  } catch (error) {
+    return { available: false, hasRows: false, items: [], inventory: [], playerHeldItem: '' };
+  }
+
+  var rows = readTable_(sheet).rows.filter(function (row) { return !!row.item_id; });
+  if (!rows.length) return { available: true, hasRows: false, items: [], inventory: [], playerHeldItem: '' };
+
+  var latest = {};
+  rows.forEach(function (row) {
+    if (recordIsNewer_(row, latest[row.item_id])) latest[row.item_id] = row;
+  });
+
+  var items = [];
+  var inventory = [];
+  var playerHeldItem = '';
+  Object.keys(latest).forEach(function (itemId) {
+    var row = latest[itemId];
+    var ownerType = String(row.owner_type || '').toUpperCase();
+    var status = String(row.status || '').toUpperCase();
+
+    if (ownerType === 'PLAYER' && ['ACTIVE', 'HELD'].indexOf(status) !== -1) {
+      var metadata = parseJson_(row.metadata_json, {});
+      items.push({
+        itemId: itemId,
+        ownerEntityId: 'PLAYER',
+        source: 'ITEM_STATE',
+        status: status,
+        label: row.display_name || itemId,
+        conflict: false
+      });
+      inventory.push({
+        id: itemId,
+        name: row.display_name || itemId,
+        desc: metadata.description || metadata.desc || ''
+      });
+      if (status === 'HELD') playerHeldItem = itemId;
+    }
+  });
+
+  return {
+    available: true,
+    hasRows: true,
+    playerHeldItem: playerHeldItem,
+    items: items,
+    inventory: inventory
+  };
+}
+
+function migrateLegacyItemState_() {
+  echoPhase2EnsureSchema_();
+  var state = getStateMap_();
+  var inventory = parseList_(stateValue_(state, 'player.inventory'), []);
+  var held = String(stateValue_(state, 'player.held_item') || '').trim();
+  var eventId = String(stateValue_(state, 'save.last_event_id') || 'PHASE2-MIGRATION');
+  var now = new Date();
+  var sheet = getSheet_(ECHO_CONFIG.sheets.items);
+  var count = 0;
+
+  inventory.forEach(function (item) {
+    var patch = echoPhase2NormalizeItemPatch_(item, normalizedItemIdentity_(item));
+    if (normalizedItemIdentity_(item) === held) patch.status = 'HELD';
+    patch.owner_type = 'PLAYER';
+    patch.owner_id = 'PLAYER';
+    patch.source = 'PHASE2_MIGRATION';
+    echoPhase2UpsertItem_(sheet, patch, eventId, now);
+    count += 1;
+  });
+
+  return { ok: true, migrated_items: count, source: 'STATE_SNAPSHOT' };
+}
+
+function migrateEchoPhase2() {
+  var schema = echoPhase2EnsureSchema_();
+  var items = migrateLegacyItemState_();
+  return { ok: true, schema: schema, item_state: items };
+}
+
+function echoPhase2NormalizeGroupUpdates_(updates) {
+  if (!updates) return [];
+  if (Array.isArray(updates)) return updates.slice();
+  if (updates.member_id || updates.entity_id) return [updates];
+
+  return Object.keys(updates).map(function (memberId) {
+    var patch = updates[memberId] && typeof updates[memberId] === 'object'
+      ? Object.assign({}, updates[memberId])
+      : {};
+    patch.member_id = patch.member_id || memberId;
+    return patch;
+  });
+}
+
+function echoPhase2NormalizeGroupPatch_(patch, fallbackId) {
+  patch = patch || {};
+  var memberId = String(patch.member_id || fallbackId || '').trim();
+  var groupId = String(patch.group_id || '').trim();
+  var entityId = String(patch.entity_id || '').trim();
+  if (!memberId || !groupId || !entityId) {
+    throw new Error('group_member_updates requires member_id, group_id and entity_id.');
+  }
+
+  var status = String(patch.status || 'ACTIVE').toUpperCase();
+  if (['ACTIVE', 'PAUSED', 'LEFT', 'INACTIVE'].indexOf(status) === -1) {
+    throw new Error('Unknown group member status: ' + status);
+  }
+
+  var json = function (value, fallback) {
+    if (value === undefined || value === null || value === '') return fallback;
+    return typeof value === 'string' ? (parseJsonValue_(value), value) : JSON.stringify(value);
+  };
+
+  return {
+    member_id: memberId,
+    group_id: groupId,
+    entity_id: entityId,
+    display_name: patch.display_name || patch.name || entityId,
+    role: patch.role || '',
+    status: status,
+    joined_at: patch.joined_at || '',
+    left_at: patch.left_at || '',
+    position: patch.position === undefined ? '' : patch.position,
+    traits_json: json(patch.traits_json !== undefined ? patch.traits_json : patch.traits, '{}'),
+    boundaries_json: json(patch.boundaries_json !== undefined ? patch.boundaries_json : patch.boundaries, '[]'),
+    source: patch.source || 'ECHO_EVENT'
+  };
+}
+
+function validatePhase2EventUpdates_(event) {
+  echoPhase2NormalizeItemUpdates_(event.item_updates || (event.state_updates && event.state_updates.item_updates))
+    .forEach(function (patch) {
+      echoPhase2NormalizeItemPatch_(patch, normalizedItemIdentity_(patch));
+    });
+
+  echoPhase2NormalizeGroupUpdates_(
+    event.group_member_updates ||
+    event.group_updates ||
+    (event.state_updates && event.state_updates.group_member_updates)
+  ).forEach(function (patch) {
+    echoPhase2NormalizeGroupPatch_(patch, patch && patch.member_id);
+  });
+}
+
+function echoPhase2ApplyGroupMemberUpdates_(event, eventId, now) {
+  var updates = echoPhase2NormalizeGroupUpdates_(
+    event.group_member_updates ||
+    event.group_updates ||
+    (event.state_updates && event.state_updates.group_member_updates)
+  );
+  if (!updates.length) return;
+
+  var sheet = getSheet_(ECHO_CONFIG.sheets.groupMembers);
+  updates.forEach(function (rawPatch) {
+    var patch = echoPhase2NormalizeGroupPatch_(rawPatch, rawPatch && rawPatch.member_id);
+    var row = findRow_(sheet, 'member_id', patch.member_id);
+    var update = {
+      last_event_id: eventId || '',
+      updated_at: now || new Date()
+    };
+
+    if (!row) {
+      update = Object.assign({}, patch, update);
+      if (['LEFT', 'INACTIVE'].indexOf(patch.status) !== -1 && !patch.left_at) {
+        update.left_at = now || new Date();
+      }
+      appendObject_(sheet, update);
+      return;
+    }
+
+    Object.keys(rawPatch || {}).forEach(function (key) {
+      if (key === 'member_id') return;
+      if (patch[key] !== undefined) update[key] = patch[key];
+    });
+    if (patch.status && ['LEFT', 'INACTIVE'].indexOf(patch.status) !== -1 &&
+        rawPatch.left_at === undefined && !row.left_at) {
+      update.left_at = now || new Date();
+    }
+    Object.keys(update).forEach(function (key) {
+      setCellByHeader_(sheet, row.__rowNumber, key, update[key]);
+    });
+  });
+}
+
+function echoPhase2CommitPlan_(event, options) {
+  options = options || {};
+  validateEventShape_(event);
+  validatePhase2EventUpdates_(event);
+
+  var context = getEchoAuthoritativeContext_({ includePrivate: false });
+  var existing = echoPhase2StartTransaction_(event, {
+    transactionId: options.transactionId || '',
+    contextFingerprint: context.fingerprint
+  });
+
+  if (existing.duplicate) {
+    return {
+      ok: true,
+      duplicate: true,
+      transaction_id: existing.transaction.transaction_id,
+      event_id: event.event_id,
+      ui_feed_id: existing.transaction.ui_feed_id || ''
+    };
+  }
+
+  var transaction = existing.transaction;
+  var plan = existing.plan;
+  var eventLogSheet = getSheet_(ECHO_CONFIG.sheets.eventLog);
+  var sceneResult = null;
+
+  try {
+    if (!transaction.event_logged_at) {
+      var existingEvent = findRow_(eventLogSheet, 'event_id', event.event_id);
+      if (!existingEvent) {
+        appendObject_(eventLogSheet, {
+          event_id: event.event_id,
+          run_id: event.run_id || 'PROTO-SAVE-001',
+          sequence: plan.sequence,
+          timestamp: new Date(),
+          chat_id: event.chat_id || 'ECHO-PROJECT',
+          event_type: event.event_type || 'PLAYER_ACTION',
+          player_action: event.player_action,
+          narrative_summary: event.narrative_summary,
+          state_changes_json: jsonString_(event.state_updates || {}),
+          new_flags: jsonString_(event.new_flags || []),
+          affected_entities: jsonString_(event.affected_entities || []),
+          canonicality: event.canonicality || 'PLAY',
+          source: event.source || 'ECHO_CHATGPT',
+          reversible: event.reversible === undefined ? 'TRUE' : String(event.reversible),
+          notes: event.notes || '',
+          content_rating: event.content_rating || '',
+          intimacy_mode: event.intimacy_mode || '',
+          turn_id: event.turn_id || '',
+          transaction_id: transaction.transaction_id,
+          revision_id: plan.revisionId || '',
+          committed_at: new Date(),
+          payload_fingerprint: plan.payloadFingerprint || ''
+        });
+      }
+      echoPhase2TransactionStage_(transaction, 'event_logged');
+    }
+
+    if (!transaction.scene_revision_at) {
+      sceneResult = echoPhase2AppendSceneRevision_(event, {
+        sceneId: plan.sceneId,
+        feedId: plan.feedId,
+        revisionId: plan.revisionId,
+        revisionNumber: plan.revisionNumber,
+        sequence: plan.sequence,
+        transactionId: transaction.transaction_id,
+        payloadFingerprint: plan.payloadFingerprint,
+        reason: 'NEW_SCENE'
+      });
+      echoPhase2TransactionStage_(transaction, 'scene_revision', {
+        ui_feed_id: sceneResult.feed_id,
+        revision_id: sceneResult.revision_id || ''
+      });
+    } else {
+      sceneResult = {
+        feed_id: transaction.ui_feed_id || '',
+        revision_id: transaction.revision_id || ''
+      };
+    }
+
+    if (!transaction.state_applied_at) {
+      applyStateUpdates_(event.state_updates || {}, event.event_id, new Date());
+      echoPhase2TransactionStage_(transaction, 'state_applied');
+    }
+
+    if (!transaction.relationships_applied_at) {
+      applyRelationshipUpdates_(event.relationship_updates || {}, event.event_id, new Date());
+      echoPhase2TransactionStage_(transaction, 'relationships_applied');
+    }
+
+    if (!transaction.items_applied_at) {
+      echoPhase2ApplyItemStateUpdates_(event, event.event_id, new Date());
+      echoPhase2TransactionStage_(transaction, 'items_applied');
+    }
+
+    if (!transaction.group_members_applied_at) {
+      echoPhase2ApplyGroupMemberUpdates_(event, event.event_id, new Date());
+      echoPhase2TransactionStage_(transaction, 'group_members_applied');
+    }
+
+    if (!transaction.preferences_applied_at) {
+      applyPreferenceUpdates_(event.preference_updates || null, event.event_id, new Date());
+      echoPhase2TransactionStage_(transaction, 'preferences_applied');
+    }
+
+    if (!transaction.profiles_applied_at) {
+      applyCharacterProfileUpdates_(event.character_profile_updates || null, event.event_id, new Date());
+      echoPhase2TransactionStage_(transaction, 'profiles_applied');
+    }
+
+    updateStateKey_('save.last_event_id', event.event_id, 'event_id', 'save metadata', event.event_id, new Date());
+    echoPhase2TransactionUpdate_(transaction.transaction_id, {
+      status: 'COMMITTED',
+      committed_at: new Date(),
+      updated_at: new Date(),
+      error_code: '',
+      recovery_action: ''
+    });
+
+    return {
+      ok: true,
+      duplicate: false,
+      transaction_id: transaction.transaction_id,
+      event_id: event.event_id,
+      ui_feed_id: sceneResult ? sceneResult.feed_id : (transaction.ui_feed_id || ''),
+      revision_id: sceneResult ? sceneResult.revision_id : (transaction.revision_id || '')
+    };
+  } catch (error) {
+    echoPhase2TransactionUpdate_(transaction.transaction_id, {
+      status: 'RECOVERY_REQUIRED',
+      updated_at: new Date(),
+      error_code: String(error && error.message ? error.message : error),
+      recovery_action: 'retry_from_processor'
+    });
+    throw error;
+  }
+}
+
+function commitTurnCore_(event, options) {
+  return echoPhase2CommitPlan_(event, options || {});
+}
+
+function commitSceneCorrectionCore_(event, options) {
+  options = options || {};
+  validateSceneCorrection_(event);
+  echoPhase2EnsureSchema_();
+
+  var turnInboxSheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
+  var originalTurn = findRow_(
+    turnInboxSheet,
+    'turn_id',
+    event.correction_for_turn_id
+  );
+  if (!originalTurn) {
+    throw new Error('Correction target turn not found: ' + event.correction_for_turn_id);
+  }
+
+  var originalEventId = String(originalTurn.commit_event_id || '').trim();
+  var sceneFeedSheet = getSheet_(ECHO_CONFIG.sheets.sceneFeed);
+  var targetScene = originalTurn.ui_feed_id
+    ? findRow_(sceneFeedSheet, 'feed_id', originalTurn.ui_feed_id)
+    : null;
+  if (!targetScene && originalEventId) {
+    targetScene = findRow_(sceneFeedSheet, 'event_id', originalEventId);
+  }
+  if (!targetScene) {
+    throw new Error('Correction target scene not found for turn: ' + event.correction_for_turn_id);
+  }
+
+  var allScenes = readTable_(sceneFeedSheet).rows.filter(isPlayableScene_);
+  var sceneId = echoPhase2SceneKey_(targetScene);
+  var current = echoPhase2LatestSceneRevision_(allScenes, sceneId) || targetScene;
+  var plan = echoPhase2PlanForEvent_(event, {
+    sceneId: sceneId,
+    feedId: event.scene.feed_id || String(current.feed_id || ''),
+    revisionNumber: echoPhase2SceneRevisionNumber_(current) + 1,
+    revisionId: 'REV-' + String(event.event_id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) + '-R' + (echoPhase2SceneRevisionNumber_(current) + 1)
+  });
+
+  var started = echoPhase2StartTransaction_(event, {
+    transactionId: options.transactionId || '',
+    contextFingerprint: '',
+    plan: plan
+  });
+  if (started.duplicate) {
+    return {
+      ok: true,
+      correction: true,
+      duplicate: true,
+      transaction_id: started.transaction.transaction_id,
+      event_id: originalEventId,
+      ui_feed_id: started.transaction.ui_feed_id || ''
+    };
+  }
+
+  var transaction = started.transaction;
+  plan = started.plan || plan;
+  try {
+    var correctionScene = Object.assign({}, event.scene, {
+      narrative_text: sceneTextForCorrection_(event)
+    });
+    var result = echoPhase2AppendSceneRevision_(
+      Object.assign({}, event, { scene: correctionScene }),
+      {
+        forceNewRevision: true,
+        sceneId: sceneId,
+        feedId: plan.feedId,
+        revisionId: plan.revisionId,
+        revisionNumber: plan.revisionNumber,
+        sequence: current.sequence,
+        sceneEventId: originalEventId,
+        correctionEventId: event.event_id,
+        sourceFeedId: current.feed_id,
+        supersedesFeedId: current.feed_id,
+        transactionId: transaction.transaction_id,
+        payloadFingerprint: echoPhase2Fingerprint_(event),
+        reason: 'CORRECTION'
+      }
+    );
+    echoPhase2TransactionStage_(transaction, 'scene_revision', {
+      ui_feed_id: result.feed_id,
+      revision_id: result.revision_id
+    });
+    echoPhase2TransactionUpdate_(transaction.transaction_id, {
+      status: 'COMMITTED',
+      committed_at: new Date(),
+      updated_at: new Date(),
+      error_code: '',
+      recovery_action: ''
+    });
+
+    return {
+      ok: true,
+      correction: true,
+      duplicate: false,
+      transaction_id: transaction.transaction_id,
+      event_id: originalEventId,
+      ui_feed_id: result.feed_id,
+      revision_id: result.revision_id
+    };
+  } catch (error) {
+    echoPhase2TransactionUpdate_(transaction.transaction_id, {
+      status: 'RECOVERY_REQUIRED',
+      updated_at: new Date(),
+      error_code: String(error && error.message ? error.message : error),
+      recovery_action: 'retry_from_processor'
+    });
+    throw error;
+  }
 }
 
