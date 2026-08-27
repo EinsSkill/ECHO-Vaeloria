@@ -1300,7 +1300,9 @@ function echoProjectionContract_() {
       'LEFT, INACTIVE and PAUSED memberships are excluded from active group projections.',
       'Consent and boundaries are descriptive state; they never create consent or permission.',
       'Projections never choose a player action, rewrite canon or mutate workbook state.'
-    ]
+    ],
+    numeric_relationship_source: 'RELATIONSHIP_STATE',
+    player_entity: 'PLAYER'
   };
 }
 
