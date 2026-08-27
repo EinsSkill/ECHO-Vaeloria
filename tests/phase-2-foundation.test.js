@@ -60,7 +60,7 @@ const declaredInternalFunctions = new Set(
   [...code.matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map((match) => match[1])
 );
 const calledInternalFunctions = new Set(
-  [...code.matchAll(/\\b([A-Za-z_$][A-Za-z0-9_$]*_)\\s*\\(/g)].map((match) => match[1])
+  [...code.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*_)\s*\(/g)].map((match) => match[1])
 );
 for (const name of calledInternalFunctions) {
   assert(
