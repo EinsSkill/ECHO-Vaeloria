@@ -1907,6 +1907,14 @@ function echoPhase4NonNumericRelationshipAxes_(axes) {
   return output;
 }
 
+function echoPhase4MembershipRole_(row, profile) {
+  var rowRole = String(row && row.role || '').trim();
+  if (rowRole) return echoPhase4RoleLabel_(rowRole);
+  return profile && String(profile.groupRole || '').trim()
+    ? echoPhase4RoleLabel_(profile.groupRole)
+    : '';
+}
+
 function echoPhase4NormalizeMembership_(row, profileByEntity) {
   row = row || {};
   if (!echoPhase4GroupMembershipActive_(row)) return null;
@@ -1929,7 +1937,7 @@ function echoPhase4NormalizeMembership_(row, profileByEntity) {
     groupId: groupId,
     entityId: entityId,
     displayName: echoPhase4PreferredDisplayName_(row, profile, entityId),
-    role: echoPhase4PreferredRole_(row, profile),
+    role: echoPhase4MembershipRole_(row, profile),
     status: String(row.status || 'ACTIVE').toUpperCase(),
     active: true,
     joinedAt: echoPhase4ValueOrNull_(row.joined_at),
