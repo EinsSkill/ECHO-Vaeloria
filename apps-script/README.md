@@ -38,6 +38,10 @@ Für das laufende Spiel gilt ein fester Ausgabevertrag:
 
 Der Runtime-Kontext liefert diese Policy unter chat_delivery, damit spätere Connectoren sie maschinenlesbar einhalten können.
 
+Phase 3B ergänzt die technische Auflösungsstruktur unter resolution_contract. ROLL, NO_ROLL und NO_CHECK werden validiert; eine neue Szene erhält eine sichtbare SYSTEM-Zeile und die Auflösung wird in EVENT_LOG und SCENE_FEED abgelegt.
+
+Phase 3C ergänzt overlay_contract und einen Commit-Readback unter status.delivery. Der Chat darf erst dann „Übertragen.“ melden, wenn der Inbox-Eintrag COMMITTED ist und eine ui_feed_id besitzt. Der vollständige, formatierte Szeneninhalt bleibt im Overlay; status und Submit geben keine Erzählung an den Chat zurück.
+
 ## Live-Integration
 
 Das bestehende `doPost()` in `Code.gs` routet Gateway-Anfragen mit
