@@ -1052,7 +1052,6 @@ function getOverlayState_() {
   var relationshipRows = readOverlayRows_(ECHO_CONFIG.sheets.relationships, overlayWarnings);
   var threadRows = readOverlayRows_(ECHO_CONFIG.sheets.threads, overlayWarnings);
   var preferenceContext = getEchoPreferenceContext_({ includeAudit: false });
-  var profileByEntity = characterProfilesByEntity_(preferenceContext.characters);
 
   var playableScenes = sceneRows.filter(isPlayableScene_);
   var scene = latestBySequence_(playableScenes) || {};
@@ -1133,9 +1132,8 @@ function getOverlayState_() {
     },
     knownFacts: parseList_(stateValue_(state, 'player.known_facts'), []),
     inventory: inventoryFrom_(stateValue_(state, 'player.inventory')),
-    relationships: relationshipRows.map(function (row) {
-      return relationshipToOverlay_(row, profileByEntity[row.entity_b] || null);
-    }),
+    relationships: echoRelationshipOverlays_(relationshipRows, preferenceContext.characters),
+
     relationshipProfiles: preferenceContext.characters.map(characterProfileToOverlay_),
     preferenceContext: preferenceContext,
     threads: threadRows.filter(isVisibleThread_).map(threadToOverlay_),
@@ -1177,6 +1175,7 @@ function isVisibleThread_(row) {
 }
 
 function relationshipToOverlay_(row, profile) {
+  row = row || {};
   profile = profile || {};
   var profileAxes = profile.relationshipAxes || {};
   var intimacyProfile = parseJson_(row.intimacy_profile_json, {});
@@ -1184,29 +1183,73 @@ function relationshipToOverlay_(row, profile) {
   if (!Array.isArray(boundaries) || !boundaries.length) {
     boundaries = Array.isArray(profile.boundaries) ? profile.boundaries : [];
   }
+
   var consentState = relationshipConsentState_(row, intimacyProfile);
   var axisOrProfile = function (rowValue, profileKey) {
     var direct = axisValue_(rowValue);
     return direct !== null ? direct : axisValue_(profileAxes[profileKey]);
   };
+  var axisDefinitions = [
+    { key: 'trust', label: 'Vertrauen' },
+    { key: 'desire', label: 'Verlangen' },
+    { key: 'respect', label: 'Respekt' },
+    { key: 'tension', label: 'Spannung' },
+    { key: 'intimacy', label: 'Intimität' },
+    { key: 'fear', label: 'Angst' },
+    { key: 'dominance', label: 'Dominanz' },
+    { key: 'resonance', label: 'Resonanz' }
+  ];
+  var allAxes = axisDefinitions.map(function (definition) {
+    return {
+      key: definition.key,
+      label: definition.label,
+      value: axisOrProfile(row[definition.key], definition.key)
+    };
+  });
+  var visibleAxes = allAxes.filter(function (axis) { return axis.value !== null; });
+  var role = echoRelationshipRoleLabel_(row, profile);
+  var summary = echoRelationshipSummary_(role, profile, consentState, allAxes);
+  var displayRole = echoRelationshipCompactRole_(role, profile, allAxes);
 
   return {
-    id: row.state_id || row.entity_b || 'UNKNOWN_RELATIONSHIP',
+    id: row.state_id || row.entity_b || profile.entityId || 'UNKNOWN_RELATIONSHIP',
     name: row.display_name || profile.displayName || row.entity_b || 'Unbekannte Bindung',
-    role: row.role || profile.groupRole || 'Beziehung · Zustand unbekannt',
-    note: row.notes || profile.notes || 'Die Beziehung wird durch deine Handlungen bestimmt.',
-    axes: [
-      { label: 'Vertrauen', value: axisOrProfile(row.trust, 'trust') },
-      { label: 'Verlangen', value: axisOrProfile(row.desire, 'desire') },
-      { label: 'Respekt', value: axisOrProfile(row.respect, 'respect') },
-      { label: 'Spannung', value: axisOrProfile(row.tension, 'tension') },
-      { label: 'Intimität', value: axisOrProfile(row.intimacy, 'intimacy') },
-      { label: 'Angst', value: axisOrProfile(row.fear, 'fear') },
-      { label: 'Dominanz', value: axisOrProfile(row.dominance, 'dominance') },
-      { label: 'Resonanz', value: axisOrProfile(row.resonance, 'resonance') }
-    ].filter(function (axis) { return axis.value !== null; }),
+    role: displayRole,
+    baseRole: role,
+    note: [row.notes || profile.notes, summary].filter(function (value) { return !!value; }).join(' · '),
+    summary: summary,
+    axes: visibleAxes,
+    stats: {
+      displayMode: 'compact',
+      exactNumbersHidden: true,
+      axes: allAxes.map(function (axis) {
+        return {
+          key: axis.key,
+          label: axis.label,
+          valueText: echoRelationshipAxisText_(axis.value),
+          established: axis.value !== null
+        };
+      }),
+      powerStatus: profile.dominanceStyles && profile.dominanceStyles.length
+        ? 'dominant'
+        : 'noch nicht festgelegt',
+      dominanceStyles: profile.dominanceStyles || [],
+      role: role,
+      compactRole: displayRole,
+      expertise: {
+        primary: profile.primaryExpertise || '',
+        secondary: profile.secondaryExpertise || ''
+      },
+      magic: profile.magicResonance || {},
+      consent: {
+        state: consentState,
+        label: consentLabel_(consentState)
+      }
+    },
     intimacy: {
-      available: consentState !== 'UNKNOWN' || axisValue_(row.tension) !== null || axisValue_(row.desire) !== null || axisValue_(row.intimacy) !== null,
+      available: consentState !== 'UNKNOWN' || visibleAxes.some(function (axis) {
+        return ['tension', 'desire', 'intimacy'].indexOf(axis.key) !== -1;
+      }),
       consentState: consentState,
       consentLabel: consentLabel_(consentState),
       tension: axisOrProfile(row.tension, 'tension') !== null
@@ -1214,6 +1257,9 @@ function relationshipToOverlay_(row, profile) {
         : axisOrProfile(row.intimacy, 'intimacy'),
       dominance: axisOrProfile(row.dominance, 'dominance'),
       submission: axisOrProfile(row.submission, 'submission'),
+      dominanceStyles: profile.dominanceStyles || [],
+      initiationStyle: profile.initiationStyle || '',
+      aftercareStyle: profile.aftercareStyle || '',
       boundaries: boundaries,
       phase: row.intimacy_phase || intimacyProfile.phase || ''
     }
@@ -2435,3 +2481,103 @@ function applyCharacterProfileUpdates_(updates, eventId, now) {
   });
 }
 
+
+/* ===== Relationship directory projection ===== */
+
+function echoRelationshipRoleLabel_(row, profile) {
+  if (row.role && row.role !== 'Beziehung · Zustand unbekannt') return row.role;
+
+  var knownRoles = {
+    first_echo_expert_and_dominant_guide: 'ECHO-Expertin · dominante Führerin',
+    echo_master: 'ECHO-Expertin',
+    dominant_guide: 'dominante Führerin'
+  };
+  if (profile.groupRole && knownRoles[profile.groupRole]) return knownRoles[profile.groupRole];
+  if (profile.groupRole) return String(profile.groupRole).replace(/_/g, ' ');
+  return 'Beziehung · Zustand unbekannt';
+}
+
+function echoRelationshipAxisText_(value) {
+  if (value === null || value === undefined) return 'noch unbekannt';
+  if (value >= 75) return 'hoch';
+  if (value >= 45) return 'aufgebaut';
+  return 'zart';
+}
+
+function echoRelationshipStyleLabels_(styles) {
+  var labels = {
+    strict_ruler: 'strenge Führung',
+    dark_domme: 'dunkle Dominanz',
+    seductive_master: 'verführerische Führung',
+    consensual_power_exchange: 'vereinbarte Machtdynamik',
+    ritualized_guidance: 'ritualisierte Führung',
+    earned_reward_and_denial: 'verdiente Freigabe und Warten',
+    foot_focus_possible: 'Fußfokus möglich'
+  };
+  return (Array.isArray(styles) ? styles : []).map(function (style) {
+    return labels[style] || String(style).replace(/_/g, ' ');
+  });
+}
+
+function echoRelationshipCompactRole_(role, profile, axes) {
+  var parts = [role];
+  if (profile.dominanceStyles && profile.dominanceStyles.length) {
+    parts.push('dominant');
+  }
+  parts.push(
+    'Stats: ' + (
+      axes.some(function (axis) { return axis.value !== null; })
+        ? 'teilweise erspielt'
+        : 'noch nicht erspielt'
+    )
+  );
+  return parts.join(' · ');
+}
+
+function echoRelationshipExpertiseLabel_(profile) {
+  var primary = String(profile.primaryExpertise || '');
+  if (primary === 'foundational ECHO training; resonance sight; practical control') {
+    return 'Grundlagen von ECHO, Resonanzsicht und praktische Kontrolle';
+  }
+  return primary;
+}
+
+function echoRelationshipSummary_(role, profile, consentState, axes) {
+  var axisSummary = axes.map(function (axis) {
+    return axis.label + ': ' + echoRelationshipAxisText_(axis.value);
+  }).join(' · ');
+  var styles = echoRelationshipStyleLabels_(profile.dominanceStyles);
+  var parts = ['Stats: ' + axisSummary];
+
+  if (styles.length) parts.push('Macht: ' + styles.join(', '));
+  var expertise = echoRelationshipExpertiseLabel_(profile);
+  if (expertise) parts.push('ECHO: ' + expertise);
+  parts.push('Einwilligung: ' + consentLabel_(consentState));
+  return parts.join(' · ');
+}
+
+function echoRelationshipOverlays_(rows, profiles) {
+  var profileByEntity = characterProfilesByEntity_(profiles || []);
+  var linkedProfiles = {};
+  var result = (rows || []).map(function (row) {
+    var profile = profileByEntity[row.entity_b] || null;
+    if (profile) linkedProfiles[profile.entityId] = true;
+    return relationshipToOverlay_(row, profile);
+  });
+
+  // A newly introduced woman is visible immediately, even if the separate
+  // numeric RELATIONSHIP_STATE row is created by a later event.
+  (profiles || []).forEach(function (profile) {
+    if (linkedProfiles[profile.entityId]) return;
+    result.push(relationshipToOverlay_({
+      entity_b: profile.entityId,
+      consent_state: 'UNKNOWN',
+      consent_profile: 'separate_profile_required',
+      boundaries_json: JSON.stringify(profile.boundaries || []),
+      intimacy_profile_json: '{}',
+      notes: 'Profil angelegt; numerischer Beziehungszustand wird im Spiel aufgebaut.'
+    }, profile));
+  });
+
+  return result;
+}
