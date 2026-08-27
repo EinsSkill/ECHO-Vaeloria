@@ -29,12 +29,15 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-3b-resolution-runtime-2026-08-27';
+var ECHO_BUILD_ID = 'phase-4-state-projections-2026-08-27';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
 var ECHO_SCENE_CONTRACT_VERSION = '1.0.0';
 var ECHO_RESOLUTION_CONTRACT_VERSION = '1.0.0';
+var ECHO_OVERLAY_CONTRACT_VERSION = '1.0.0';
+var ECHO_PROJECTION_CONTRACT_VERSION = '1.0.0';
+var ECHO_CONTEXT_BINDING_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -102,7 +105,7 @@ var ECHO_AUTHORITY_ORDER_ = [
 ];
 
 var ECHO_CHAT_DELIVERY_POLICY = {
-  version: '1.0.0',
+  version: '1.1.0',
   mode: 'OVERLAY_ONLY',
   chat_response_mode: 'ACK_ONLY',
   narrative_destination: 'SCENE_FEED',
@@ -112,7 +115,10 @@ var ECHO_CHAT_DELIVERY_POLICY = {
   completion_rule: 'ACK_ONLY_AFTER_COMMIT_AND_READBACK',
   processing_mode: 'THOROUGH_PERSISTENCE_AND_CONSISTENCY_CHECK',
   preferred_quality_window: '2–3 Minuten interne Prüfung, sofern der Zug es erfordert',
-  include_narrative_in_chat: false
+  include_narrative_in_chat: false,
+  readback_endpoint: 'gateway.status',
+  success_acknowledgement_requires: ['COMMITTED', 'ui_feed_id'],
+  narrative_readback: 'OVERLAY_ONLY'
 };
 
 function echoChatDeliveryPolicy_() {
@@ -127,7 +133,10 @@ function echoChatDeliveryPolicy_() {
     completion_rule: ECHO_CHAT_DELIVERY_POLICY.completion_rule,
     processing_mode: ECHO_CHAT_DELIVERY_POLICY.processing_mode,
     preferred_quality_window: ECHO_CHAT_DELIVERY_POLICY.preferred_quality_window,
-    include_narrative_in_chat: ECHO_CHAT_DELIVERY_POLICY.include_narrative_in_chat
+    include_narrative_in_chat: ECHO_CHAT_DELIVERY_POLICY.include_narrative_in_chat,
+    readback_endpoint: ECHO_CHAT_DELIVERY_POLICY.readback_endpoint,
+    success_acknowledgement_requires: ECHO_CHAT_DELIVERY_POLICY.success_acknowledgement_requires.slice(),
+    narrative_readback: ECHO_CHAT_DELIVERY_POLICY.narrative_readback
   };
 }
 
@@ -146,6 +155,15 @@ function doGet(e) {
   }
   if (action === 'resolution-contract') {
     return jsonOutput_(echoGetResolutionContract());
+  }
+  if (action === 'overlay-contract') {
+    return jsonOutput_(echoGetOverlayContract());
+  }
+  if (action === 'projection-contract') {
+    return jsonOutput_(echoGetProjectionContract());
+  }
+  if (action === 'context-binding-contract') {
+    return jsonOutput_(echoGetContextBindingContract());
   }
   if (action === 'preferences') {
     return jsonOutput_(getEchoPreferenceContext_({ includeAudit: true }));
@@ -445,7 +463,9 @@ function enqueueTurn_(event) {
       commit_event_id: '',
       ui_feed_id: '',
       error_code: '',
-      processed_at: ''
+      processed_at: '',
+      context_fingerprint: event.context_fingerprint || '',
+      context_read_at: event.context_read_at || ''
     });
 
     return {
@@ -1206,6 +1226,118 @@ function echoGetResolutionContract() {
   };
 }
 
+function echoOverlayContract_() {
+  return {
+    version: ECHO_OVERLAY_CONTRACT_VERSION,
+    endpoint: 'GET?action=state',
+    source_of_truth: 'ECHO_WORKBOOK',
+    current_scene: {
+      fields: [
+        'feedId', 'eventId', 'sceneId', 'revisionId', 'revisionNumber',
+        'title', 'narrativeText', 'formattedText', 'text', 'blocks',
+        'resolution', 'sceneType', 'status', 'locationId',
+        'sceneContractVersion', 'resolutionContractVersion'
+      ],
+      blocks_source: 'SCENE_FEED.scene_blocks_json',
+      rendering_rule: 'Render visible blocks in order; use formattedText/text only as a legacy fallback.'
+    },
+    chronicle: {
+      field: 'chronicle',
+      entries_include_blocks: true,
+      entries_include_resolution: true
+    },
+    delivery: {
+      chat_response_mode: 'ACK_ONLY',
+      success_requires: ['validation_status=COMMITTED', 'ui_feed_id'],
+      success_text: 'Übertragen.',
+      narrative_destination: 'currentScene',
+      no_narrative_in_chat: true
+    }
+  };
+}
+
+function echoGetOverlayContract() {
+  return {
+    ok: true,
+    contract: echoOverlayContract_()
+  };
+}
+
+
+function echoProjectionContract_() {
+  return {
+    version: ECHO_PROJECTION_CONTRACT_VERSION,
+    source_of_truth: 'ECHO_WORKBOOK',
+    read_rule: 'Rebuild projections from the current workbook context before every turn.',
+    unknown_value_rule: 'Unknown values remain null, UNKNOWN or an empty collection until the workbook establishes them.',
+    projections: {
+      world: {
+        source_sheets: ['STATE_SNAPSHOT', 'SCENE_FEED'],
+        fields: [
+          'available', 'locationId', 'locationLabel', 'chapterId',
+          'chapterLabel', 'clock', 'elapsedMinutes', 'knownRegions'
+        ]
+      },
+      characters: {
+        source_sheets: [
+          'ECHO_CHARACTER_PROFILES', 'RELATIONSHIP_STATE',
+          'GROUP_MEMBERS', 'ECHO_PREFERENCE_PROFILE'
+        ],
+        fields: [
+          'entityId', 'displayName', 'status', 'profile',
+          'preferenceData', 'relationship', 'memberships', 'groupIds'
+        ]
+      },
+      relationships: {
+        source_sheets: ['RELATIONSHIP_STATE', 'ECHO_CHARACTER_PROFILES'],
+        fields: [
+          'stateId', 'entityA', 'entityB', 'status', 'lastEventId',
+          'numericState', 'axes', 'consent', 'boundaries', 'intimacy'
+        ]
+      },
+      groups: {
+        source_sheets: ['GROUP_MEMBERS'],
+        fields: ['groupId', 'label', 'active', 'memberCount', 'members']
+      }
+    },
+    invariants: [
+      'Stable entity IDs come from workbook rows; display labels never replace them.',
+      'Stored numeric relationship values are projected only when present in relationship state.',
+      'LEFT, INACTIVE and PAUSED memberships are excluded from active group projections.',
+      'Consent and boundaries are descriptive state; they never create consent or permission.',
+      'Projections never choose a player action, rewrite canon or mutate workbook state.'
+    ],
+    numeric_relationship_source: 'RELATIONSHIP_STATE',
+    player_entity: 'PLAYER'
+  };
+}
+
+function echoGetProjectionContract() {
+  return {
+    ok: true,
+    contract: echoProjectionContract_()
+  };
+}
+
+
+function echoContextBindingContract_() {
+  return {
+    version: ECHO_CONTEXT_BINDING_VERSION,
+    supplied_field: 'context_fingerprint',
+    statuses: ['MATCHED', 'NOT_PROVIDED', 'STALE', 'UNAVAILABLE'],
+    stale_policy: 'REJECT_BEFORE_COMMIT',
+    legacy_policy: 'Turns without a context fingerprint remain accepted for compatibility.',
+    revalidation: 'Compare the supplied fingerprint with a fresh authoritative workbook context immediately before commit.'
+  };
+}
+
+function echoGetContextBindingContract() {
+  return {
+    ok: true,
+    contract: echoContextBindingContract_()
+  };
+}
+
 function echoSceneContract_() {
   return {
     version: ECHO_SCENE_CONTRACT_VERSION,
@@ -1224,7 +1356,9 @@ function echoGetSceneContract() {
   return {
     ok: true,
     contract: echoSceneContract_(),
-    resolution_contract: echoResolutionContract_()
+    resolution_contract: echoResolutionContract_(),
+    overlay_contract: echoOverlayContract_(),
+    projection_contract: echoProjectionContract_()
   };
 }
 
@@ -1347,13 +1481,15 @@ function processTurnInbox_() {
         var result;
         if (isSceneCorrection_(event)) {
           result = commitSceneCorrectionCore_(event, {
-            transactionId: row.transaction_id || ''
+            transactionId: row.transaction_id || '',
+            submittedContextFingerprint: row.context_fingerprint || ''
           });
         } else {
           validateEventShape_(event);
           result = commitTurnCore_(event, {
             skipInboxAppend: true,
-            transactionId: row.transaction_id || ''
+            transactionId: row.transaction_id || '',
+            submittedContextFingerprint: row.context_fingerprint || ''
           });
         }
 
@@ -1647,6 +1783,534 @@ function mergeConditions_(base, additions, removals, duration, eventId) {
 // ECHO read-only overlay state projection.
 // The projection exposes only facts already present in the private state store.
 
+function overlaySceneDeliveryPayload_(scene) {
+  scene = scene || {};
+  var formattedText = sceneTextForOverlay_(scene);
+  var feedId = String(scene.feed_id || '');
+  var eventId = String(scene.event_id || '');
+  var sceneId = String(scene.scene_id || feedId);
+  var revisionId = String(scene.revision_id || '');
+  var revisionNumber = Number(scene.revision_number || 0);
+
+  return {
+    feedId: feedId,
+    feed_id: feedId,
+    eventId: eventId,
+    event_id: eventId,
+    sceneId: sceneId,
+    scene_id: sceneId,
+    revisionId: revisionId,
+    revision_id: revisionId,
+    revisionNumber: revisionNumber,
+    revision_number: revisionNumber,
+    sequence: Number(scene.sequence || 0),
+    title: scene.title || 'Neue Szene',
+    narrativeText: formattedText,
+    formattedText: formattedText,
+    text: formattedText,
+    blocks: sceneBlocksForOverlay_(scene),
+    resolution: normalizeResolution_(scene.resolution_json),
+    sceneType: scene.scene_type || 'narrative',
+    scene_type: scene.scene_type || 'narrative',
+    status: scene.status || 'PLAY',
+    locationId: String(scene.location_id || ''),
+    location_id: String(scene.location_id || ''),
+    mood: scene.mood || 'unbestimmt',
+    contentRating: scene.content_rating || '',
+    intimacyMode: scene.intimacy_mode || '',
+    availableActions: actionsFromScene_(scene.available_actions_json),
+    sceneContractVersion: scene.scene_contract_version || ECHO_SCENE_CONTRACT_VERSION,
+    resolutionContractVersion: ECHO_RESOLUTION_CONTRACT_VERSION,
+    source: 'SCENE_FEED',
+    renderMode: 'BLOCKS_FIRST'
+  };
+}
+
+
+/* ===== Phase 4: stable workbook-backed state projections ===== */
+
+function echoPhase4CompareText_(left, right) {
+  var a = String(left === undefined || left === null ? '' : left).toLowerCase();
+  var b = String(right === undefined || right === null ? '' : right).toLowerCase();
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function echoPhase4ValueOrNull_(value) {
+  return value === undefined || value === null || value === '' ? null : value;
+}
+
+function echoPhase4JsonValue_(raw, fallback) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  if (typeof raw === 'string') return parseJson_(raw, fallback);
+  return raw;
+}
+
+function echoPhase4ListValue_(raw) {
+  if (Array.isArray(raw)) return raw.slice();
+  var parsed = echoPhase4JsonValue_(raw, null);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function echoPhase4CanonicalEntityId_(entityId, profileByEntity) {
+  var id = String(entityId || '').trim();
+  var profile = profileByEntity && profileByEntity[id];
+  return profile && profile.entityId ? String(profile.entityId) : id;
+}
+
+function echoPhase4IsPlayerEntity_(entityId) {
+  return String(entityId || '').trim().toUpperCase() === 'PLAYER';
+}
+
+function echoPhase4HasTechnicalLabel_(value, entityId) {
+  var label = String(value || '').trim();
+  if (!label) return true;
+
+  var normalizedLabel = label.toUpperCase().replace(/[ -]+/g, '_');
+  var normalizedId = String(entityId || '').trim().toUpperCase().replace(/[ -]+/g, '_');
+  if (normalizedId && normalizedLabel === normalizedId) return true;
+
+  return /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/.test(normalizedLabel);
+}
+
+function echoPhase4PreferredDisplayName_(row, profile, entityId) {
+  if (profile && String(profile.displayName || '').trim()) {
+    return String(profile.displayName).trim();
+  }
+
+  var rowLabel = String(row && (row.display_name || row.name || '') || '').trim();
+  if (rowLabel && !echoPhase4HasTechnicalLabel_(rowLabel, entityId)) return rowLabel;
+  return rowLabel || String(entityId || '').trim();
+}
+
+function echoPhase4RoleLabel_(role) {
+  var value = String(role || '').trim();
+  var labels = {
+    first_echo_expert_and_dominant_guide: 'ECHO-Expertin · dominante Führerin',
+    echo_master: 'ECHO-Expertin',
+    dominant_guide: 'dominante Führerin'
+  };
+  return labels[value] || value.replace(/_/g, ' ');
+}
+
+function echoPhase4PreferredRole_(row, profile) {
+  if (profile && String(profile.groupRole || '').trim()) {
+    return echoPhase4RoleLabel_(profile.groupRole);
+  }
+
+  var rowRole = String(row && row.role || '').trim();
+  return echoPhase4HasTechnicalLabel_(rowRole, '')
+    ? ''
+    : echoPhase4RoleLabel_(rowRole);
+}
+
+function echoPhase4GroupMembershipActive_(row) {
+  var status = String(row && row.status || '').trim().toUpperCase();
+  if (!status) return true;
+  return ['ACTIVE', 'OPEN', 'CURRENT', 'PLAY', 'NEGOTIATED', 'LOCKED', 'UNINITIALIZED'].indexOf(status) !== -1;
+}
+
+function echoPhase4RowIsLater_(candidate, current) {
+  if (!current) return true;
+
+  var candidateTime = stateTimestamp_(candidate.updated_at || candidate.timestamp || candidate.created_at);
+  var currentTime = stateTimestamp_(current.updated_at || current.timestamp || current.created_at);
+  if (candidateTime !== currentTime) return candidateTime > currentTime;
+
+  var candidateRow = Number(candidate.__rowNumber || 0);
+  var currentRow = Number(current.__rowNumber || 0);
+  return candidateRow >= currentRow;
+}
+
+function echoPhase4NonNumericRelationshipAxes_(axes) {
+  var output = {};
+  Object.keys(axes || {}).forEach(function (key) {
+    var value = axes[key];
+    if (value === undefined || value === null || value === '') return;
+    if (String(value).toLowerCase() === 'unknown') return;
+    if (typeof value === 'number' && !isFinite(value)) return;
+    if (axisValue_(value) !== null) return;
+    output[key] = value;
+  });
+  return output;
+}
+
+function echoPhase4MembershipRole_(row, profile) {
+  var rowRole = String(row && row.role || '').trim();
+  if (rowRole) return echoPhase4RoleLabel_(rowRole);
+  return profile && String(profile.groupRole || '').trim()
+    ? echoPhase4RoleLabel_(profile.groupRole)
+    : '';
+}
+
+function echoPhase4NormalizeMembership_(row, profileByEntity) {
+  row = row || {};
+  if (!echoPhase4GroupMembershipActive_(row)) return null;
+
+  var rawEntityId = String(row.entity_id || '').trim();
+  var groupId = String(row.group_id || '').trim();
+  if (!rawEntityId || !groupId || echoPhase4IsPlayerEntity_(rawEntityId)) return null;
+
+  var entityId = echoPhase4CanonicalEntityId_(rawEntityId, profileByEntity);
+  if (!entityId || isTechnicalRelationshipPlaceholder_({ entity_b: entityId })) return null;
+
+  var profile = profileByEntity && profileByEntity[entityId];
+  var traits = echoPhase4JsonValue_(row.traits_json, {});
+  var boundaries = echoPhase4JsonValue_(row.boundaries_json, []);
+  if (!traits || typeof traits !== 'object' || Array.isArray(traits)) traits = {};
+  if (!Array.isArray(boundaries)) boundaries = [];
+
+  return {
+    memberId: echoPhase4ValueOrNull_(row.member_id),
+    groupId: groupId,
+    entityId: entityId,
+    displayName: echoPhase4PreferredDisplayName_(row, profile, entityId),
+    role: echoPhase4MembershipRole_(row, profile),
+    status: String(row.status || 'ACTIVE').toUpperCase(),
+    active: true,
+    joinedAt: echoPhase4ValueOrNull_(row.joined_at),
+    leftAt: echoPhase4ValueOrNull_(row.left_at),
+    position: echoPhase4ValueOrNull_(row.position),
+    traits: traits,
+    boundaries: boundaries,
+    source: 'GROUP_MEMBERS'
+  };
+}
+
+function echoPhase4MembershipCompare_(left, right) {
+  var leftPosition = Number(left.position);
+  var rightPosition = Number(right.position);
+  var leftHasNumber = left.position !== null && left.position !== '' && isFinite(leftPosition);
+  var rightHasNumber = right.position !== null && right.position !== '' && isFinite(rightPosition);
+
+  if (leftHasNumber && rightHasNumber && leftPosition !== rightPosition) {
+    return leftPosition - rightPosition;
+  }
+  if (leftHasNumber !== rightHasNumber) return leftHasNumber ? -1 : 1;
+
+  var groupDiff = echoPhase4CompareText_(left.groupId, right.groupId);
+  if (groupDiff) return groupDiff;
+  return echoPhase4CompareText_(left.memberId, right.memberId);
+}
+
+function echoPhase4GroupMemberships_(rows, profileByEntity) {
+  return (rows || [])
+    .map(function (row) {
+      return echoPhase4NormalizeMembership_(row, profileByEntity);
+    })
+    .filter(function (membership) {
+      return !!membership;
+    })
+    .sort(echoPhase4MembershipCompare_);
+}
+
+function echoPhase4GroupMembershipsByEntity_(rows, profileByEntity) {
+  var byEntity = {};
+  echoPhase4GroupMemberships_(rows, profileByEntity).forEach(function (membership) {
+    if (!byEntity[membership.entityId]) byEntity[membership.entityId] = [];
+    byEntity[membership.entityId].push(membership);
+  });
+  return byEntity;
+}
+
+function echoPhase4RelationshipRowsByEntity_(rows, profileByEntity) {
+  var latest = {};
+
+  (rows || []).forEach(function (row) {
+    var rawEntityId = String(row && (row.entity_b || row.character_id || row.entity_id || '') || '').trim();
+    if (!rawEntityId || echoPhase4IsPlayerEntity_(rawEntityId)) return;
+    var entityId = echoPhase4CanonicalEntityId_(rawEntityId, profileByEntity);
+    if (!entityId || isTechnicalRelationshipPlaceholder_({ entity_b: entityId })) return;
+
+    if (!latest[entityId] || echoPhase4RowIsLater_(row, latest[entityId])) {
+      latest[entityId] = row;
+    }
+  });
+
+  return latest;
+}
+
+function echoPhase4RelationshipProfile_(profile) {
+  if (!profile) return null;
+
+  return Object.assign({}, profile, {
+    relationshipAxes: echoPhase4NonNumericRelationshipAxes_(profile.relationshipAxes || {})
+  });
+}
+
+function echoPhase4ProjectGroups_(rows, profiles) {
+  var profileByEntity = characterProfilesByEntity_(profiles || []);
+  var groups = {};
+
+  echoPhase4GroupMemberships_(rows, profileByEntity).forEach(function (membership) {
+    if (!groups[membership.groupId]) {
+      groups[membership.groupId] = {
+        groupId: membership.groupId,
+        label: membership.groupId,
+        active: true,
+        memberCount: 0,
+        members: [],
+        source: 'GROUP_MEMBERS'
+      };
+    }
+    groups[membership.groupId].members.push(membership);
+    groups[membership.groupId].memberCount += 1;
+  });
+
+  return Object.keys(groups)
+    .sort(echoPhase4CompareText_)
+    .map(function (groupId) {
+      return groups[groupId];
+    });
+}
+
+function echoPhase4ProjectCharacters_(relationshipRows, groupRows, profiles, characterPreferences) {
+  profiles = Array.isArray(profiles) ? profiles : [];
+  characterPreferences = characterPreferences || {};
+
+  var profileByEntity = characterProfilesByEntity_(profiles);
+  var relationshipByEntity = echoPhase4RelationshipRowsByEntity_(relationshipRows, profileByEntity);
+  var membershipsByEntity = echoPhase4GroupMembershipsByEntity_(groupRows, profileByEntity);
+  var entityIds = {};
+
+  profiles.forEach(function (profile) {
+    if (!profile || !echoProfileStatusIsActive_(profile.status)) return;
+    var entityId = String(profile.entityId || '').trim();
+    if (entityId && !echoPhase4IsPlayerEntity_(entityId) &&
+        !isTechnicalRelationshipPlaceholder_({ entity_b: entityId })) {
+      entityIds[entityId] = true;
+    }
+  });
+
+  Object.keys(relationshipByEntity).forEach(function (entityId) {
+    entityIds[entityId] = true;
+  });
+  Object.keys(membershipsByEntity).forEach(function (entityId) {
+    entityIds[entityId] = true;
+  });
+  Object.keys(characterPreferences).forEach(function (entityId) {
+    var canonical = echoPhase4CanonicalEntityId_(entityId, profileByEntity);
+    if (canonical && !echoPhase4IsPlayerEntity_(canonical) &&
+        !isTechnicalRelationshipPlaceholder_({ entity_b: canonical })) {
+      entityIds[canonical] = true;
+    }
+  });
+
+  return Object.keys(entityIds)
+    .sort(function (left, right) {
+      var leftProfile = profileByEntity[left];
+      var rightProfile = profileByEntity[right];
+      var nameDiff = echoPhase4CompareText_(
+        leftProfile && leftProfile.displayName || left,
+        rightProfile && rightProfile.displayName || right
+      );
+      return nameDiff || echoPhase4CompareText_(left, right);
+    })
+    .map(function (entityId) {
+      var profile = profileByEntity[entityId] || null;
+      var relationshipRow = relationshipByEntity[entityId] || null;
+      var memberships = membershipsByEntity[entityId] || [];
+      var displayName = echoPhase4PreferredDisplayName_(relationshipRow, profile, entityId);
+      var role = echoPhase4PreferredRole_(relationshipRow, profile);
+      var relationshipProfile = echoPhase4RelationshipProfile_(profile);
+      var relationshipInput = Object.assign({}, relationshipRow || {}, {
+        entity_b: entityId,
+        display_name: displayName,
+        role: role
+      });
+
+      if (!relationshipInput.consent_state && !relationshipInput.consent_profile) {
+        relationshipInput.consent_state = 'UNKNOWN';
+      }
+
+      var relationshipOverlay = relationshipToOverlay_(relationshipInput, relationshipProfile);
+      var profileOverlay = profile ? characterProfileToOverlay_(profile) : null;
+      var preferenceData = profile && profile.preferences
+        ? profile.preferences
+        : (characterPreferences[entityId] || {});
+
+      return {
+        entityId: entityId,
+        displayName: displayName,
+        status: profile ? echoPhase4ValueOrNull_(profile.status) : null,
+        role: role || null,
+        available: true,
+        source: relationshipRow && profile
+          ? 'ECHO_CHARACTER_PROFILES+RELATIONSHIP_STATE'
+          : (profile ? 'ECHO_CHARACTER_PROFILES' : (relationshipRow ? 'RELATIONSHIP_STATE' : 'GROUP_MEMBERS/ECHO_PREFERENCE_PROFILE')),
+        profile: profileOverlay,
+        preferenceData: preferenceData,
+        relationship: {
+          available: !!relationshipRow,
+          stateId: relationshipRow ? echoPhase4ValueOrNull_(relationshipRow.state_id) : null,
+          entityA: relationshipRow ? echoPhase4ValueOrNull_(relationshipRow.entity_a) : null,
+          entityB: entityId,
+          status: relationshipRow ? echoPhase4ValueOrNull_(relationshipRow.status) : null,
+          lastEventId: relationshipRow ? echoPhase4ValueOrNull_(relationshipRow.last_event_id) : null,
+          updatedAt: relationshipRow ? echoPhase4ValueOrNull_(relationshipRow.updated_at) : null,
+          numericState: relationshipOverlay.stats.numericState,
+          axes: relationshipOverlay.stats.axes,
+          exactNumbersHidden: relationshipOverlay.stats.exactNumbersHidden,
+          consent: relationshipOverlay.stats.consent,
+          boundaries: relationshipOverlay.intimacy.boundaries || [],
+          intimacy: relationshipOverlay.intimacy,
+          overlay: relationshipOverlay
+        },
+        memberships: memberships,
+        groupIds: memberships.map(function (membership) { return membership.groupId; }),
+        groupRoles: memberships.map(function (membership) { return membership.role; })
+      };
+    });
+}
+
+function echoPhase4WorldProjection_(state, scene) {
+  state = state || {};
+  scene = scene || {};
+
+  var stateLocationId = String(stateValue_(state, 'player.location_id') || '').trim();
+  var sceneLocationId = String(scene.location_id || '').trim();
+  var locationId = stateLocationId || sceneLocationId;
+  var locationSource = stateLocationId ? 'STATE_SNAPSHOT' : (sceneLocationId ? 'SCENE_FEED' : 'STATE_SNAPSHOT');
+
+  var chapterId = echoPhase4ValueOrNull_(stateValue_(state, 'story.chapter_id'));
+  var chapterLabel = echoPhase4ValueOrNull_(stateValue_(state, 'story.chapter_label'));
+  var clock = echoPhase4ValueOrNull_(stateValue_(state, 'world.clock'));
+  var elapsedMinutes = echoPhase4ValueOrNull_(stateValue_(state, 'world.elapsed_minutes'));
+  var knownRegions = echoPhase4ListValue_(stateValue_(state, 'world.known_regions'));
+
+  return {
+    available: !!(locationId || chapterId !== null || chapterLabel !== null ||
+      clock !== null || elapsedMinutes !== null || knownRegions.length),
+    source: locationSource,
+    locationId: locationId || null,
+    locationLabel: locationId ? locationLabel_(locationId) : null,
+    chapterId: chapterId,
+    chapterLabel: chapterLabel,
+    clock: clock,
+    elapsedMinutes: elapsedMinutes,
+    knownRegions: knownRegions
+  };
+}
+
+function echoPhase4BuildProjections_(state, scene, relationshipRows, groupRows, preferenceContext, warnings) {
+  preferenceContext = preferenceContext || {};
+  var profiles = Array.isArray(preferenceContext.characters) ? preferenceContext.characters : [];
+  var characterPreferences = preferenceContext.characterPreferences || {};
+  var characters = echoPhase4ProjectCharacters_(
+    relationshipRows,
+    groupRows,
+    profiles,
+    characterPreferences
+  );
+  var groups = echoPhase4ProjectGroups_(groupRows, profiles);
+  var relationships = characters.map(function (character) {
+    return character.relationship;
+  });
+
+  return {
+    version: ECHO_PROJECTION_CONTRACT_VERSION,
+    source: 'ECHO_WORKBOOK',
+    world: echoPhase4WorldProjection_(state, scene),
+    characters: characters,
+    relationships: relationships,
+    groups: groups,
+    profileCount: profiles.length,
+    relationshipCount: relationships.length,
+    groupCount: groups.length,
+    warnings: warnings || []
+  };
+}
+
+
+/* ===== Phase 5: context binding and stale-turn protection ===== */
+
+function echoPhase5ContextBinding_(suppliedFingerprint, currentFingerprint) {
+  var supplied = String(suppliedFingerprint || '').trim();
+  var current = String(currentFingerprint || '').trim();
+
+  if (!supplied) {
+    return {
+      version: ECHO_CONTEXT_BINDING_VERSION,
+      status: 'NOT_PROVIDED',
+      accepted: true,
+      supplied: false,
+      suppliedFingerprint: '',
+      currentFingerprint: current || null
+    };
+  }
+
+  if (!current) {
+    return {
+      version: ECHO_CONTEXT_BINDING_VERSION,
+      status: 'UNAVAILABLE',
+      accepted: false,
+      supplied: true,
+      suppliedFingerprint: supplied,
+      currentFingerprint: null
+    };
+  }
+
+  if (supplied === current) {
+    return {
+      version: ECHO_CONTEXT_BINDING_VERSION,
+      status: 'MATCHED',
+      accepted: true,
+      supplied: true,
+      suppliedFingerprint: supplied,
+      currentFingerprint: current
+    };
+  }
+
+  return {
+    version: ECHO_CONTEXT_BINDING_VERSION,
+    status: 'STALE',
+    accepted: false,
+    supplied: true,
+    suppliedFingerprint: supplied,
+    currentFingerprint: current
+  };
+}
+
+function echoPhase5RecoveryMayContinue_(event, transaction) {
+  if (!transaction) return false;
+
+  var status = String(transaction.status || '').trim().toUpperCase();
+  if (status === 'COMMITTED') return true;
+  if (['PREPARED', 'APPLYING', 'RECOVERY_REQUIRED'].indexOf(status) === -1) return false;
+
+  var storedFingerprint = String(
+    transaction.payload_fingerprint ||
+    parseJson_(transaction.plan_json, {}).payloadFingerprint ||
+    ''
+  ).trim();
+  if (!storedFingerprint) return false;
+
+  return storedFingerprint === echoPhase2Fingerprint_(event);
+}
+
+function echoPhase5AssertContextBinding_(event, options, currentContext) {
+  event = event || {};
+  options = options || {};
+  var context = currentContext || getEchoAuthoritativeContext_({ includePrivate: false });
+  var supplied = options.submittedContextFingerprint || event.context_fingerprint || '';
+  var binding = echoPhase5ContextBinding_(supplied, context.fingerprint);
+  var recoveryOverride = !binding.accepted &&
+    echoPhase5RecoveryMayContinue_(event, options.existingTransaction);
+
+  if (!binding.accepted && !recoveryOverride) {
+    throw new Error(
+      binding.status + ': context must be reread before this turn is committed.'
+    );
+  }
+
+  binding.recoveryOverride = recoveryOverride;
+  return {
+    context: context,
+    binding: binding
+  };
+}
+
 function getOverlayState_() {
   var state = getStateMap_();
   var overlayWarnings = [];
@@ -1655,11 +2319,20 @@ function getOverlayState_() {
   var relationshipRows = readOverlayRows_(ECHO_CONFIG.sheets.relationships, overlayWarnings);
   var threadRows = readOverlayRows_(ECHO_CONFIG.sheets.threads, overlayWarnings);
   var preferenceContext = getEchoPreferenceContext_({ includeAudit: false });
+  var groupMembers = echoPhase2GroupMembersForContext_(overlayWarnings);
 
   var playableScenes = echoPhase2EffectiveSceneRows_(sceneRows.filter(isPlayableScene_));
   var scene = latestBySequence_(playableScenes) || {};
   var events = eventRows.filter(function (row) { return row.event_id; }).slice().sort(sequenceAscending_);
   var latestEvent = events.length ? events[events.length - 1] : null;
+  var projections = echoPhase4BuildProjections_(
+    state,
+    scene,
+    relationshipRows,
+    groupMembers,
+    preferenceContext,
+    overlayWarnings
+  );
 
   var locationId = stateValue_(state, 'player.location_id') || scene.location_id || 'UNKNOWN_LOCATION';
   var health = numberOrBlank_(stateValue_(state, 'player.health'));
@@ -1671,21 +2344,18 @@ function getOverlayState_() {
   var memoryState = localizeMemory_(stateValue_(state, 'player.memory_state') || 'NO_MEMORY');
   var currentLocation = locationLabel_(locationId);
 
-  var currentScene = {
-    chapterLabel: chapterLabel_(state),
-    title: scene.title || 'Aktuelle Szene',
-    moodTag: localizeMood_(scene.mood || 'unbestimmt'),
-    text: sceneTextForOverlay_(scene) || 'Noch keine sichtbare Szene im persistenten Spielstand.',
-    blocks: sceneBlocksForOverlay_(scene),
-    sceneType: scene.scene_type || 'narrative',
-    contentRating: scene.content_rating || '',
-    intimacyMode: scene.intimacy_mode || '',
-    resolution: normalizeResolution_(scene.resolution_json),
-    location: currentLocation,
-    locationLabel: currentLocation,
-    locationId: locationId,
-    sceneContractVersion: scene.scene_contract_version || ECHO_SCENE_CONTRACT_VERSION
-  };
+  var currentScene = overlaySceneDeliveryPayload_(scene);
+  currentScene.chapterLabel = chapterLabel_(state);
+  currentScene.title = scene.title || 'Aktuelle Szene';
+  currentScene.moodTag = localizeMood_(scene.mood || 'unbestimmt');
+  if (!currentScene.text) {
+    currentScene.text = 'Noch keine sichtbare Szene im persistenten Spielstand.';
+    currentScene.narrativeText = currentScene.text;
+    currentScene.formattedText = currentScene.text;
+  }
+  currentScene.location = currentLocation;
+  currentScene.locationLabel = currentLocation;
+  currentScene.locationId = locationId;
 
   var conditionNames = conditions.map(conditionName_).filter(function (name) { return !!name; });
   var currentHealth = health === '' ? null : Number(health);
@@ -1741,8 +2411,15 @@ function getOverlayState_() {
     knownFacts: parseList_(stateValue_(state, 'player.known_facts'), []),
     inventory: itemOwnership.inventory || inventoryFrom_(stateValue_(state, 'player.inventory')),
     itemOwnership: itemOwnership.items,
-    groupMembers: echoPhase2GroupMembersForContext_(overlayWarnings),
+    groupMembers: groupMembers,
     relationships: echoRelationshipOverlays_(relationshipRows, preferenceContext.characters),
+    projections: projections,
+    worldProjection: projections.world,
+    characterProjections: projections.characters,
+    groupProjections: projections.groups,
+    relationshipProjections: projections.relationships,
+    characters: projections.characters,
+    groups: projections.groups,
 
     relationshipProfiles: preferenceContext.characters
       .filter(function (profile) {
@@ -1756,7 +2433,9 @@ function getOverlayState_() {
     selectedMapRegion: mapRegionIdForLocation_(locationId),
     chapters: chaptersFrom_(state),
     sceneContract: echoSceneContract_(),
-    resolutionContract: echoResolutionContract_()
+    resolutionContract: echoResolutionContract_(),
+    overlayContract: echoOverlayContract_(),
+    projectionContract: echoProjectionContract_()
   };
 }
 
@@ -2079,12 +2758,21 @@ function chronicleFrom_(scenes, events) {
   var sceneEventIds = {};
 
   scenes.slice().sort(sequenceAscending_).forEach(function (scene) {
+    var delivery = overlaySceneDeliveryPayload_(scene);
     sceneEventIds[String(scene.event_id || '')] = true;
     entries.push({
-      id: scene.feed_id,
-      title: scene.title || 'Neue Szene',
-      text: sceneTextForOverlay_(scene),
-      fiction: String(scene.scene_type || '').toLowerCase() !== 'system'
+      id: delivery.feedId,
+      title: delivery.title,
+      text: delivery.text,
+      narrativeText: delivery.narrativeText,
+      formattedText: delivery.formattedText,
+      blocks: delivery.blocks,
+      resolution: delivery.resolution,
+      sceneType: delivery.sceneType,
+      status: delivery.status,
+      locationId: delivery.locationId,
+      sceneContractVersion: delivery.sceneContractVersion,
+      fiction: String(delivery.sceneType || '').toLowerCase() !== 'system'
     });
   });
 
@@ -2094,6 +2782,13 @@ function chronicleFrom_(scenes, events) {
       id: event.event_id,
       title: 'Ereignis ' + (event.sequence || ''),
       text: event.narrative_summary || event.player_action || '',
+      narrativeText: event.narrative_summary || event.player_action || '',
+      formattedText: event.narrative_summary || event.player_action || '',
+      blocks: [],
+      resolution: null,
+      sceneType: 'event',
+      status: 'COMMITTED',
+      locationId: '',
       fiction: true
     });
   });
@@ -2386,7 +3081,7 @@ function echoGetRuntimeContext() {
     ok: true,
     version: ECHO_FAST_GATEWAY_VERSION,
     build: ECHO_BUILD_ID,
-    context_version: 'phase-2',
+    context_version: 'phase-4',
     state_model_version: ECHO_STATE_MODEL_VERSION,
     transaction_model_version: ECHO_TRANSACTION_MODEL_VERSION,
     source_of_truth: 'ECHO_WORKBOOK',
@@ -2403,7 +3098,33 @@ function echoGetRuntimeContext() {
     preference_coverage: authoritative.preferences.preferenceCoverage,
     scene_contract: echoSceneContract_(),
     resolution_contract: echoResolutionContract_(),
+    overlay_contract: echoOverlayContract_(),
+    projection_contract: echoProjectionContract_(),
+    context_binding_contract: echoContextBindingContract_(),
+    projections: authoritative.projections,
     preferences: authoritative.preferences
+  };
+}
+
+function echoTurnDelivery_(turn) {
+  turn = turn || {};
+  var status = String(turn.validation_status || '').trim().toUpperCase();
+  var feedId = String(turn.ui_feed_id || '').trim();
+  var overlayReady = status === 'COMMITTED' && !!feedId;
+  var processing = ['PENDING', 'READY', 'PROCESSING', 'RECOVERY_REQUIRED'].indexOf(status) !== -1;
+
+  return {
+    validation_status: status || 'UNKNOWN',
+    overlay_ready: overlayReady,
+    ui_feed_id: overlayReady ? feedId : '',
+    chat_response: overlayReady ? ECHO_CHAT_DELIVERY_POLICY.acknowledgement_on_success : '',
+    include_narrative_in_chat: false,
+    narrative_destination: 'OVERLAY_ONLY',
+    wait_for_processor: processing,
+    requires_readback: !overlayReady && status === 'COMMITTED',
+    error_code: status === 'ERROR'
+      ? String(turn.error_code || 'TURN_PROCESSING_ERROR')
+      : ''
   };
 }
 
@@ -2426,6 +3147,7 @@ function echoSubmitTurn(turn) {
         duplicate: true,
         row: existingRow,
         turn: existing,
+        delivery: echoTurnDelivery_(existing),
         chat_delivery: echoChatDeliveryPolicy_()
       };
     }
@@ -2444,6 +3166,7 @@ function echoSubmitTurn(turn) {
         duplicate: false,
         error: code,
         last_turn: latest,
+        delivery: echoTurnDelivery_(latest),
         chat_delivery: echoChatDeliveryPolicy_()
       };
     }
@@ -2495,6 +3218,7 @@ function echoSubmitTurn(turn) {
       duplicate: false,
       row: targetRow,
       turn: written,
+      delivery: echoTurnDelivery_(written),
       chat_delivery: echoChatDeliveryPolicy_()
     };
   } finally {
@@ -2508,9 +3232,24 @@ function echoGetTurnStatus(turnId) {
   const inbox = echoFastRequireSheet_(echoFastSpreadsheet_(), 'TURN_INBOX');
   const row = echoFastFindTurnRow_(inbox, id);
 
-  return row
-    ? { ok: true, found: true, row: row, turn: echoFastReadInboxRow_(inbox, row) }
-    : { ok: true, found: false, turn_id: id };
+  if (!row) {
+    return {
+      ok: true,
+      found: false,
+      turn_id: id,
+      delivery: echoTurnDelivery_({ validation_status: 'NOT_FOUND' })
+    };
+  }
+
+  var turn = echoFastReadInboxRow_(inbox, row);
+  return {
+    ok: true,
+    found: true,
+    row: row,
+    turn: turn,
+    delivery: echoTurnDelivery_(turn),
+    chat_delivery: echoChatDeliveryPolicy_()
+  };
 }
 
 /** Router for an optional Web App or future custom connector. */
@@ -2526,6 +3265,12 @@ function echoHandleGatewayRequest(request) {
       return echoGetSceneContract();
     case 'resolution-contract':
       return echoGetResolutionContract();
+    case 'overlay-contract':
+      return echoGetOverlayContract();
+    case 'projection-contract':
+      return echoGetProjectionContract();
+    case 'context-binding-contract':
+      return echoGetContextBindingContract();
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
@@ -3278,7 +4023,7 @@ function characterProfileToOverlay_(profile) {
     id: profile.entityId,
     name: profile.displayName,
     status: profile.status,
-    role: profile.groupRole || 'Rolle noch nicht festgelegt',
+    role: profile.groupRole ? echoPhase4RoleLabel_(profile.groupRole) : 'Rolle noch nicht festgelegt',
     expertise: {
       primary: profile.primaryExpertise,
       secondary: profile.secondaryExpertise
@@ -4051,7 +4796,7 @@ function getEchoAuthoritativeContext_(options) {
   var playableScenes = echoPhase2EffectiveSceneRows_(sceneRows.filter(isPlayableScene_));
   var relationshipRows = echoPhase2ActiveRows_(ECHO_CONFIG.sheets.relationships, warnings);
   var threadRows = echoPhase2ActiveRows_(ECHO_CONFIG.sheets.threads, warnings);
-  var groupMembers = echoPhase2ActiveRows_(ECHO_CONFIG.sheets.groupMembers, warnings);
+  var groupMembers = echoPhase2GroupMembersForContext_(warnings);
   var itemRows = echoPhase2Rows_(ECHO_CONFIG.sheets.items, warnings);
   var preferenceContext = getEchoPreferenceContext_({ includeAudit: !!options.includePrivate });
 
@@ -4084,9 +4829,17 @@ function getEchoAuthoritativeContext_(options) {
   );
   var currentScene = latestBySequence_(playableScenes) || {};
   var openQuestions = echoPhase2Rows_('OPEN_QUESTIONS', warnings, { statuses: ['OPEN', 'ACTIVE'] });
+  var projections = echoPhase4BuildProjections_(
+    state,
+    currentScene,
+    relationshipRows,
+    groupMembers,
+    preferenceContext,
+    warnings
+  );
 
   var context = {
-    context_version: 'phase-2',
+    context_version: 'phase-4',
     source_of_truth: 'ECHO_WORKBOOK',
     source_sheets: [
       'CANON', 'DECISIONS', 'RULES', 'ECHO_SYSTEM', 'WORLD', 'TIMELINE',
@@ -4108,7 +4861,11 @@ function getEchoAuthoritativeContext_(options) {
       preferences: preferenceContext,
       items: itemRows,
       group_members: groupMembers,
-      threads: threadRows
+      threads: threadRows,
+      world_projection: projections.world,
+      character_projections: projections.characters,
+      relationship_projections: projections.relationships,
+      group_projections: projections.groups
     },
     narrative: {
       current_scene: echoPhase2StripRow_(currentScene),
@@ -4135,8 +4892,11 @@ function getEchoAuthoritativeContext_(options) {
       stop_word: 'Stopp',
       write_boundary: 'TURN_INBOX',
       narrative_destination: 'SCENE_FEED',
-      chat_acknowledgement: 'Übertragen. only after commit and readback.'
-    }
+      chat_acknowledgement: 'Übertragen. only after commit and readback.',
+      projection_rule: 'Use the current workbook-backed projections; never invent missing facts or numeric relationship values.'
+    },
+    projection_contract: echoProjectionContract_(),
+    projections: projections
   };
   context.fingerprint = echoPhase2Fingerprint_(context);
   return context;
@@ -4813,6 +5573,11 @@ function echoPhase2CommitPlan_(event, options) {
   validatePhase2EventUpdates_(event);
 
   var context = getEchoAuthoritativeContext_({ includePrivate: false });
+  var existingTransaction = echoPhase2TransactionForEvent_(event.event_id);
+  var bindingOptions = Object.assign({}, options, {
+    existingTransaction: existingTransaction
+  });
+  var contextBinding = echoPhase5AssertContextBinding_(event, bindingOptions, context);
   var existing = echoPhase2StartTransaction_(event, {
     transactionId: options.transactionId || '',
     contextFingerprint: context.fingerprint
@@ -4957,6 +5722,11 @@ function commitSceneCorrectionCore_(event, options) {
   options = options || {};
   validateSceneCorrection_(event);
   echoPhase2EnsureSchema_();
+  var existingCorrectionTransaction = echoPhase2TransactionForEvent_(event.event_id);
+  var correctionBindingOptions = Object.assign({}, options, {
+    existingTransaction: existingCorrectionTransaction
+  });
+  var correctionContextBinding = echoPhase5AssertContextBinding_(event, correctionBindingOptions, null);
 
   var turnInboxSheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
   var originalTurn = findRow_(

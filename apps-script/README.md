@@ -38,6 +38,10 @@ Für das laufende Spiel gilt ein fester Ausgabevertrag:
 
 Der Runtime-Kontext liefert diese Policy unter chat_delivery, damit spätere Connectoren sie maschinenlesbar einhalten können.
 
+Phase 3B ergänzt die technische Auflösungsstruktur unter resolution_contract. ROLL, NO_ROLL und NO_CHECK werden validiert; eine neue Szene erhält eine sichtbare SYSTEM-Zeile und die Auflösung wird in EVENT_LOG und SCENE_FEED abgelegt.
+
+Phase 3C ergänzt overlay_contract und einen Commit-Readback unter status.delivery. Der Chat darf erst dann „Übertragen.“ melden, wenn der Inbox-Eintrag COMMITTED ist und eine ui_feed_id besitzt. Der vollständige, formatierte Szeneninhalt bleibt im Overlay; status und Submit geben keine Erzählung an den Chat zurück.
+
 ## Live-Integration
 
 Das bestehende `doPost()` in `Code.gs` routet Gateway-Anfragen mit
@@ -66,3 +70,25 @@ Die Trennung lautet damit: **Code öffentlich, Konfiguration und Spielzustand pr
 `setupEchoTrigger()` führt vor der Trigger-Erstellung auch `setupEchoSchema()` aus. Die Migration ergänzt ausschließlich fehlende Spalten für `respect`, `tension`, `safety`, `dominance`, `submission`, `consent_state`, `boundaries_json`, `intimacy_phase`, `intimacy_profile_json`, `teaching`, `content_rating` und `intimacy_mode`. Bestehende Werte werden nicht überschrieben.
 
 Die Beziehungsschicht kann damit Vertrauen, Verlangen, Angst, Respekt, Spannung und Sicherheitslage sowie eine freiwillige, pausierbare oder widerrufbare Nähe-Dynamik darstellen. Diese Metadaten sind keine Eingabe und erzeugen keine Zustimmung.
+
+Phase 4 ergänzt stabile, workbook-basierte Projektionen für Welt, Charaktere, Beziehungen und Gruppen:
+
+- context_version ist phase-4.
+- projection_contract beschreibt die stabilen Ausgabefelder und ihre Quellen.
+- Charaktereinträge werden aus Profil, Beziehung, Gruppenmitgliedschaft und charakterbezogenen Präferenzen über eine stabile Entity-ID zusammengeführt.
+- Aktive Gruppenmitgliedschaften werden deterministisch sortiert; LEFT, INACTIVE und PAUSED werden nicht als aktive Mitglieder projiziert.
+- Numerische Beziehungswerte kommen ausschließlich aus RELATIONSHIP_STATE. Profilwerte bleiben qualitative Profilinformationen; Unbekanntes wird nicht zu einer Zahl.
+- GET?action=projection-contract und die Gateway-Operation projection-contract liefern den technischen Vertrag.
+
+Phase 4 benötigt keine neue Migration und schreibt keine privaten Tabellenwerte in Git. Beim späteren Sammel-Import genügt weiterhin die konsolidierte apps-script/Code.gs.
+
+Phase 5 ergänzt die Kontextbindung für neue Spielzüge:
+
+- Der Runtime-Kontext liefert context_binding_contract und context_fingerprint.
+- Ein Connector kann den gelesenen context_fingerprint zusammen mit dem Zug in TURN_INBOX übergeben.
+- Vor dem Commit liest der Processor den autoritativen Workbook-Kontext erneut.
+- Bei übereinstimmender Signatur wird der Zug verarbeitet; ein abweichender Fingerprint wird als STALE abgelehnt, bevor EVENT_LOG, SCENE_FEED oder State geschrieben werden.
+- Ohne Fingerprint bleiben ältere direkte Clients kompatibel; sie verlieren aber den zusätzlichen Stale-Schutz.
+- Der Vertrag ist unter GET?action=context-binding-contract und als Gateway-Operation context-binding-contract verfügbar.
+
+Auch Phase 5 verändert keine privaten Tabellenwerte und benötigt keine zusätzliche Migration.
