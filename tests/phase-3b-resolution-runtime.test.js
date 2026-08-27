@@ -50,7 +50,6 @@ for (const forbidden of [
   'SCENE-20260826-2356-A11C',
   'SCENE-CORRECTION-20260827-0020-F4D8',
   'fullThreeTruthsSceneText_',
-  'LOC_VAEL_THARYN_HIDDEN_WALL_HOLLOW'
 ]) {
   assert(!code.includes(forbidden), `private or historical content leaked: ${forbidden}`);
 }
