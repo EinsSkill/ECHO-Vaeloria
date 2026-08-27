@@ -1400,7 +1400,9 @@ function relationshipToOverlay_(row, profile) {
       exactNumbersHidden: true,
       profileLoaded: profileLoaded,
       numericState: visibleAxes.length ? 'partially_established' : 'not_established',
-      numericStateLabel: visibleAxes.length ? 'teilweise erspielt' : 'noch nicht erspielt',
+      numericStateLabel: visibleAxes.length
+        ? 'teilweise erspielt'
+        : (profileLoaded ? 'Profilwerte hinterlegt; numerische Werte entwickeln sich im Spiel' : 'noch nicht erspielt'),
       axes: allAxes.map(function (axis) {
         return {
           key: axis.key,
@@ -2362,7 +2364,11 @@ function characterProfileToOverlay_(profile) {
       visibility: 'compact',
       profileLoaded: profileHasDisplayData_(profile) || qualitativeStats.length > 0,
       numericState: knownAxes.length ? 'partially_established' : 'not_established',
-      numericStateLabel: knownAxes.length ? 'teilweise erspielt' : 'noch nicht erspielt',
+      numericStateLabel: knownAxes.length
+        ? 'teilweise erspielt'
+        : (qualitativeStats.length
+          ? 'Profilwerte hinterlegt; numerische Werte entwickeln sich im Spiel'
+          : 'noch nicht erspielt'),
       knownAxes: knownAxes,
       qualitative: qualitativeStats
     }
@@ -2755,8 +2761,10 @@ function echoRelationshipSummary_(role, profile, consentState, axes, qualitative
     parts.push('Stats: ' + establishedAxes.map(function (axis) {
       return axis.label + ': ' + echoRelationshipAxisText_(axis.value);
     }).join(' · '));
+  } else if ((qualitativeStats || []).length) {
+    parts.push('Stats: Profilwerte hinterlegt; numerische Beziehungswerte entwickeln sich im Spiel');
   } else {
-    parts.push('Stats: Beziehungswerte noch nicht erspielt');
+    parts.push('Stats: noch nicht erspielt');
   }
 
   var highlights = (qualitativeStats || []).filter(function (stat) {
