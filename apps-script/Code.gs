@@ -1854,6 +1854,39 @@ function echoGetDiagnostics_() {
   };
 }
 
+// ===== Fast Turn Gateway =====
+
+// ECHO – Fast Turn Gateway
+// Public, secret-free reference implementation.
+// Live spreadsheet IDs, deployment URLs and tokens belong in Script Properties.
+
+const ECHO_FAST_GATEWAY_VERSION = '1.3.0';
+
+const ECHO_FAST_DEFAULT_RUNTIME_KEYS = [
+  'save.last_event_id',
+  'player.location_id',
+  'player.known_identity',
+  'player.health',
+  'player.health_max',
+  'player.resonance_stage',
+  'player.memory_state',
+  'player.posture',
+  'player.equipment_main_hand',
+  'player.held_item',
+  'player.clothing_state',
+  'player.seal_threshold_state',
+  'player.inventory',
+  'player.known_facts',
+  'player.conditions',
+  'player.echo_mastery_profile',
+  'player.active_relationships',
+  'world.clock',
+  'world.elapsed_minutes',
+  'world.known_regions',
+  'story.chapter_id',
+  'story.chapter_label'
+];
+
 function echoGetRuntimeContext() {
   var ss = echoFastSpreadsheet_();
   var inbox = echoFastRequireSheet_(ss, 'TURN_INBOX');
