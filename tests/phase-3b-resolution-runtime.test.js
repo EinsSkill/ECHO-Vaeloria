@@ -143,7 +143,7 @@ assert.throws(
     dc: 10,
     d20: 8,
     modifier: 1,
-    total: 99
+    total: 20
   }),
   /does not match/
 );
