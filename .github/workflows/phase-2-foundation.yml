@@ -1,8 +1,8 @@
-name: Phase 3C overlay delivery foundation
+name: Phase 4 stable workbook projections
 
 on:
   push:
-    branches: [main, phase-3c-overlay-delivery]
+    branches: [main, phase-3c-overlay-delivery, phase-4-state-projections]
   pull_request:
     branches: [main]
 
@@ -28,3 +28,5 @@ jobs:
         run: node tests/phase-3b-resolution-runtime.test.js
       - name: Run Phase 3C checks
         run: node tests/phase-3c-overlay-delivery.test.js
+      - name: Run Phase 4 checks
+        run: node tests/phase-4-state-projections.test.js
