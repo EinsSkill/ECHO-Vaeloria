@@ -24,6 +24,42 @@ var ECHO_CONFIG = {
   }
 };
 
+
+var ECHO_BUILD_ID = 'phase-1-foundation-2026-08-27';
+var ECHO_STATE_MODEL_VERSION = '2.2.0';
+var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
+
+var ECHO_STATE_ALIAS_TO_CANONICAL_ = {
+  world_location_id: 'player.location_id',
+  character_known_identity: 'player.known_identity',
+  health: 'player.health',
+  health_max: 'player.health_max',
+  resonance_stage: 'player.resonance_stage',
+  world_clock: 'world.clock',
+  elapsed_minutes: 'world.elapsed_minutes',
+  player_posture: 'player.posture',
+  equipment_main_hand: 'player.equipment_main_hand',
+  held_item: 'player.held_item',
+  clothing_state: 'player.clothing_state',
+  seal_threshold_state: 'player.seal_threshold_state',
+  inventory: 'player.inventory',
+  known_facts: 'player.known_facts',
+  conditions: 'player.conditions',
+  'player.health_current': 'player.health',
+  'world.elapsed_minutes_legacy': 'world.elapsed_minutes'
+};
+
+var ECHO_AUTHORITY_ORDER_ = [
+  'platform_and_safety',
+  'player_stop_and_explicit_boundaries',
+  'npc_boundaries_and_consent',
+  'project_canon',
+  'canonical_game_state',
+  'established_relationship_state',
+  'effective_player_preferences',
+  'current_scene_improvisation'
+];
+
 var ECHO_CHAT_DELIVERY_POLICY = {
   version: '1.0.0',
   mode: 'OVERLAY_ONLY',
@@ -59,7 +95,7 @@ function echoChatDeliveryPolicy_() {
 function doGet(e) {
   var action = e && e.parameter ? String(e.parameter.action || '') : '';
   if (action === 'health') {
-    return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0' });
+    return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0', build: ECHO_BUILD_ID, state_model: ECHO_STATE_MODEL_VERSION, preference_policy: ECHO_PREFERENCE_POLICY_VERSION });
   }
   if (action === 'delivery-policy') {
     return jsonOutput_(echoGetChatDeliveryPolicy());
@@ -71,13 +107,13 @@ function doGet(e) {
     return jsonOutput_(echoValidatePreferenceProfile());
   }
   if (action === 'state') {
-    // A queued turn must not make the read-only overlay unreachable.
-    try {
-      processTurnInbox_();
-    } catch (error) {
-      console.warn('ECHO state refresh skipped: ' + String(error && error.message ? error.message : error));
-    }
+    // State reads are side-effect free. The processor is driven by its trigger
+    // or an explicit write path, never by an overlay GET request.
     return jsonOutput_(getOverlayState_());
+  }
+  if (action === 'diagnostics') {
+    requireApiKey_(e && e.parameter ? e.parameter.token : '');
+    return jsonOutput_(echoGetDiagnostics_());
   }
 
   var template = HtmlService.createTemplateFromFile('Index');
@@ -105,7 +141,7 @@ function doPost(e) {
     // Existing direct API remains fully backwards compatible.
     requireApiKey_(body.token || (e && e.parameter ? e.parameter.token : ''));
     if (body.action === 'health') {
-      return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0' });
+      return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0', build: ECHO_BUILD_ID, state_model: ECHO_STATE_MODEL_VERSION, preference_policy: ECHO_PREFERENCE_POLICY_VERSION });
     }
 
     // Every external game turn enters TURN_INBOX as PENDING. The processor
@@ -132,7 +168,6 @@ function includeBase64(filename) {
 }
 
 function getOverlayStateForClient() {
-  processTurnInbox_();
   return getOverlayState_();
 }
 
@@ -216,6 +251,7 @@ function validateEventShape_(event) {
   if (!Array.isArray(event.scene.available_actions_json)) {
     throw new Error('scene.available_actions_json must be an array');
   }
+  validateSceneBlocks_(event.scene);
   if (!event.state_updates || typeof event.state_updates !== 'object' || Array.isArray(event.state_updates)) {
     throw new Error('state_updates must be an object');
   }
@@ -399,7 +435,7 @@ function setupEchoSchema() {
     'teaching'
   ]);
   ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode']);
-  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode']);
+  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'scene_blocks_json']);
   return { ok: true, message: 'ECHO-Schema geprüft und fehlende Spalten ergänzt.' };
 }
 
@@ -469,7 +505,9 @@ function nextSequence_(sheet, header) {
 }
 
 function readTable_(sheet) {
-  var values = sheet.getDataRange().getDisplayValues();
+  // Keep native numbers and Date values. Display strings can turn timestamps
+  // into locale-specific text such as "46261,31773" and break ordering.
+  var values = sheet.getDataRange().getValues();
   if (!values.length) return { headers: [], rows: [] };
   var headers = values[0].map(function(header) { return String(header || '').trim(); });
   var rows = [];
@@ -485,15 +523,50 @@ function readTable_(sheet) {
   return { headers: headers, rows: rows };
 }
 
+function stateTimestamp_(value) {
+  if (value instanceof Date) return value.getTime();
+  var text = String(value || '').trim();
+  if (!text) return 0;
+  var parsed = Date.parse(text);
+  if (isFinite(parsed)) return parsed;
+  var numeric = Number(text.replace(',', '.'));
+  return isFinite(numeric) ? numeric : 0;
+}
+
+function recordIsNewer_(candidate, current) {
+  if (!current) return true;
+  var candidateTime = stateTimestamp_(candidate && candidate.updated_at);
+  var currentTime = stateTimestamp_(current && current.updated_at);
+  if (candidateTime !== currentTime) return candidateTime > currentTime;
+  return Number(candidate && candidate.__rowNumber || 0) > Number(current && current.__rowNumber || 0);
+}
+
+function canonicalStateKey_(key) {
+  var normalized = String(key || '').trim();
+  return ECHO_STATE_ALIAS_TO_CANONICAL_[normalized] || normalized;
+}
+
+function isLegacyStateKey_(key) {
+  return Object.prototype.hasOwnProperty.call(
+    ECHO_STATE_ALIAS_TO_CANONICAL_,
+    String(key || '').trim()
+  );
+}
+
 function getStateMap_() {
   var rows = readTable_(getSheet_(ECHO_CONFIG.sheets.state)).rows;
   var result = {};
-  rows.forEach(function(row) { if (row.state_key) result[row.state_key] = row; });
+  rows.forEach(function (row) {
+    var rawKey = String(row.state_key || '').trim();
+    if (!rawKey || isLegacyStateKey_(rawKey)) return;
+    if (recordIsNewer_(row, result[rawKey])) result[rawKey] = row;
+  });
   return result;
 }
 
 function stateValue_(state, key) {
-  return state[key] ? state[key].value : '';
+  var canonical = canonicalStateKey_(key);
+  return state[canonical] ? state[canonical].value : '';
 }
 
 function parseList_(raw, fallback) {
@@ -568,30 +641,99 @@ function jsonOutput_(object) {
  * A correction updates the presentation of an existing scene. It must not create
  * a second timeline event or apply relationship/state deltas a second time.
  */
-function fullThreeTruthsSceneText_() {
-  return "Die geschützte Mulde liegt still zwischen zerbrochenen Mauern. Feuchte Wurzeln greifen durch alten Stein, und über dem Wald verliert der graue Tag langsam seine Kraft.\n\n\n\nDu siehst noch einmal an dir hinab. Das beschädigte Tuch hängt nass und schwer an deiner Hüfte. Dann hebst du den Blick wieder zu Mireth.\n\n\n\n„Okay“, sagst du. „Ich werde Geduld haben. Du wirst sehen.“\n\n\n\nDu lässt das freche Grinsen ein wenig schmaler werden.\n\n\n\n„Ich werde nun nichts mehr in dieser Richtung zu dir sagen, bis du das nächste Mal auf mich damit zukommst. Ich werde so brav sein, wie du es bisher noch nicht gemerkt hast, bis du es erlaubst, etwas zu tun.“\n\n\n\nFür einen Moment antwortet Mireth nicht. Ihr Blick bleibt auf deinem Gesicht liegen, ruhig und aufmerksam. Nicht misstrauisch. Aber auch nicht bereit, dir das Versprechen einfach abzunehmen.\n\n\n\n„Brav“, wiederholt sie schließlich.\n\n\n\nDas Wort klingt in ihrem Mund nicht wie Spott. Eher wie eine Prüfung, deren Regeln noch nicht vollständig ausgesprochen worden sind.\n\n\n\n„Ein Wort ist schnell gesagt. Interessant wird es erst danach.“\n\n\n\nSie lässt dir gerade genug Zeit, um zu verstehen, dass sie nicht nur deine Absicht meint, bevor sie den Blick über die Mulde schweifen lässt.\n\n\n\n„Du wolltest, dass ich dir zeige, wie ich einen Lagerplatz prüfe?“\n\n\n\nDu nickst.\n\n\n\n„Dann beobachte. Nicht nur mich. Den Ort.“\n\n\n\nMireth geht nicht sofort in die Mitte der Mulde. Sie bleibt zunächst am Rand stehen und dreht sich langsam, bis sie jeden Abschnitt des gebrochenen Mauerkranzes gesehen hat.\n\n\n\n„Wir beginnen nicht dort, wo es bequem aussieht“, sagt sie. „Wir beginnen dort, wo jemand zu uns kommen könnte.“\n\n\n\nSie deutet auf den schmaleren Zugang zwischen zwei schief stehenden Steinen. Der Weg zurück zum alten Pfad ist von Wurzeln, feuchtem Laub und niedrigem Gestrüpp verdeckt. Von hier aus ist er nicht vollständig einsehbar.\n\n\n\n„Der erste Zugang ist eng genug, um eine Bewegung zu verlangsamen. Das ist nützlich, wenn wir ihn verteidigen müssen. Es ist gefährlich, wenn wir fliehen müssen und jemand uns bereits erwartet.“\n\n\n\nMireth geht einige Schritte weiter, ohne den Boden aus den Augen zu lassen.\n\n\n\n„Der zweite Zugang liegt dort hinten. Breiter. Schlechter gedeckt. Dafür sehen wir früher, wenn sich etwas nähert.“\n\n\n\nSie bleibt stehen und sieht zu dir zurück.\n\n\n\n„Was folgt daraus?“\n\n\n\nDu lässt deinen Blick über die beiden Wege wandern. Nicht nur über das, was offen sichtbar ist, sondern auch über die Stellen dazwischen. Mireth wartet, ohne dir die Antwort abzunehmen.\n\n\n\nErst als du lange genug geschaut hast, nickt sie knapp.\n\n\n\n„Gut. Ein Ort ist nicht sicher, nur weil man von einer Stelle aus nichts Bedrohliches sieht.“\n\n\n\nSie führt dich weiter zum trockeneren Kern der Mulde. Dort liegt der Boden etwas höher. Eine niedrige Mauer nimmt den Wind, und die zerbrochenen Steine brechen die Sicht aus mehreren Richtungen.\n\n\n\n„Hier könnten wir liegen. Nicht bequem. Nicht warm. Aber weniger sichtbar als dort draußen.“\n\n\n\nMireth geht in die Hocke und streicht nicht über den Boden. Sie betrachtet nur die feuchten Stellen, die Wurzeln und die kleinen Vertiefungen zwischen den Steinen.\n\n\n\n„Kein frisches Feuer. Keine frisch zerdrückten Pflanzen. Keine eindeutige Spur von mehreren Personen.“\n\n\n\nSie hebt den Blick zu dir.\n\n\n\n„Sag nicht: keine Spuren.“\n\n\n\nIhre Stimme wird leiser, aber dadurch nicht weniger bestimmt.\n\n\n\n„Sag: keine klaren frischen Spuren. Das ist ein Unterschied.“\n\n\n\nAm Rand der Mulde bleibt sie vor einem niedrigen Durchlass stehen. Farn hängt über einer dunklen Öffnung, die halb unter einer Wurzel verschwindet.\n\n\n\n„Und dort?“\n\n\n\nDu siehst hinein, ohne dich näher heranzuwagen.\n\n\n\n„Ein möglicher Durchlass“, sagst du vorsichtig.\n\n\n\n„Möglich“, bestätigt Mireth. „Mehr wissen wir noch nicht.“\n\n\n\nSie nimmt einen trockenen Zweig vom Boden. Nicht ihre Hand. Nicht ihren Fuß. Mit der Spitze prüft sie zuerst den sichtbaren Rand, dann die Erde darunter. Nichts kippt. Keine Schnur spannt sich. Kein Stein rutscht aus seiner Lage.\n\n\n\nSie prüft noch einmal die Seiten und lässt den Zweig anschließend sinken.\n\n\n\n„Keine sichtbare Falle. Das bedeutet nicht, dass dort keine ist.“\n\n\n\n„Du gehst also immer davon aus, dass eine da sein könnte?“\n\n\n\n„Nein.“\n\n\n\nMireth sieht dich an.\n\n\n\n„Ich gehe davon aus, dass ich es nicht weiß. Das reicht, um meine Hand nicht blind in ein Loch zu stecken.“\n\n\n\nSie richtet sich wieder auf. Für einen kurzen Moment steht sie so nah, dass du ihre Wärme trotz des feuchten Windes wahrnimmst. Sie berührt dich nicht. Sie muss es nicht. Ihre Aufmerksamkeit liegt bereits schwer genug auf dir.\n\n\n\n„Du wolltest mir zusehen. Also merk dir: Erst sehen. Dann prüfen. Dann entscheiden.“\n\n\n\nIhr Blick wandert zu den Mauerresten.\n\n\n\n„Ein Feuer wäre hier angenehm.“\n\n\n\n„Aber keine gute Idee“, sagst du.\n\n\n\n„Warum?“\n\n\n\n„Rauch. Licht. Und wir kennen die Gegend noch nicht gut genug.“\n\n\n\nMireth hält deinen Blick einen Herzschlag länger fest.\n\n\n\n„Richtig. Nicht, weil Feuer grundsätzlich falsch wäre. Weil ein Vorteil an einem unbekannten Ort gleichzeitig eine Einladung sein kann.“\n\n\n\nSie zeigt dir noch einmal den trockeneren Kern.\n\n\n\n„Der Platz ist brauchbar. Vorläufig. Zwei Zugänge, etwas Deckung, kein offenes Feuer, keine klaren frischen Spuren. Mehr wissen wir nicht.“\n\n\n\nDann dreht sie sich vollständig zu dir um.\n\n\n\n„Und jetzt zu deiner anderen Bitte.“\n\n\n\nDer Kristall in deiner Hand bleibt still. Auch die Runen geben keine Antwort. Mireth bemerkt deinen Blick, wartet aber, bis du wieder sie ansiehst.\n\n\n\n„Du wolltest etwas über ECHO lernen“, sagt sie. „Dann lernst du zuerst, was du nicht tun wirst.“\n\n\n\nSie tritt einen halben Schritt näher.\n\n\n\n„Du wirst nichts erzwingen. Du wirst nichts hineininterpretieren, nur weil du dir eine Antwort wünschst. Und du wirst mir nicht erzählen, was du glaubst, bevor du mir sagst, was du tatsächlich wahrnimmst.“\n\n\n\n„Was soll ich tun?“\n\n\n\n„Drei wahre Dinge finden.“\n\n\n\nMireth hebt drei Finger, langsam und ohne jede Hast.\n\n\n\n„Keine Deutung. Kein Wunsch. Keine Geschichte.“\n\n\n\nDer erste Finger sinkt.\n\n\n\n„Etwas, das dein Körper sicher weiß. Kälte auf der Haut. Druck unter den Füßen. Spannung in einer Schulter.“\n\n\n\nDer zweite Finger sinkt.\n\n\n\n„Etwas, das du mit deinen Sinnen wahrnimmst. Wind von einer Seite. Wasser in der Ferne. Der Geruch von feuchtem Stein.“\n\n\n\nDer dritte Finger sinkt.\n\n\n\n„Und etwas, bei dem du ehrlich sagen kannst, dass du es nicht weißt.“\n\n\n\nDu willst etwas erwidern, doch Mireth hebt eine Hand. Nicht scharf. Nur früh genug, um dich zum Warten zu bringen.\n\n\n\n„Wenn du vermutest, sag, dass du vermutest. Wenn du hoffst, sag, dass du hoffst. Aber verkleide beides nicht als Wahrheit.“\n\n\n\nIhr Blick geht kurz zum schwarzen Kristall und kehrt dann zu dir zurück.\n\n\n\n„Das ist die erste Tür zu Resonanz. Nicht Macht. Wahrhaftigkeit.“\n\n\n\nSie deutet auf den Boden vor dir.\n\n\n\n„Stell dich dorthin. Schließe die Augen nur, wenn du möchtest. Du musst nichts beweisen.“\n\n\n\nEine kurze Pause.\n\n\n\n„Aber wenn du anfängst, dann hörst du nicht nach dem ersten Eindruck auf. Du bleibst ruhig. Du prüfst, ob es wirklich da ist.“\n\n\n\nDer Wald schweigt. Keine Glocke schlägt. Hinter den Mauern bewegt sich nur der Wind durch das feuchte Laub.\n\n\n\nMireth wartet.\n\n\n\n„Drei wahre Dinge“, sagt sie noch einmal. „Und wenn du nur zwei findest, sagst du zwei. Wenn du keines sicher benennen kannst, sagst du das.“\n\n\n\nIhre Stimme wird weicher, ohne an Klarheit zu verlieren.\n\n\n\n„Jetzt zeig mir, ob du gelernt hast, zwischen dem, was du willst, und dem, was wirklich vor dir liegt, zu unterscheiden.“";
-}
-
 function sceneTextForCorrection_(event) {
-  if (isSceneCorrection_(event) &&
-      String(event.correction_for_turn_id || '') === 'TURN-20260826-2356-A11C') {
-    return fullThreeTruthsSceneText_();
-  }
-  return String(event && event.scene && event.scene.narrative_text || '');
+  if (!event || !event.scene) return '';
+  return sceneTextFromBlocks_(
+    event.scene.scene_blocks_json || event.scene.blocks_json || event.scene.blocks,
+    event.scene.narrative_text
+  );
 }
 
 function sceneTextForOverlay_(scene) {
   if (!scene) return '';
-  var feedId = String(scene.feed_id || '');
-  var eventId = String(scene.event_id || '');
-  if ([
-    'SCENE-20260826-2356-A11C',
-    'SCENE-CORRECTION-20260827-0020-F4D8'
-  ].indexOf(feedId) !== -1 ||
-      eventId === 'EVT-PLAYER-20260826-2356-A11C') {
-    return fullThreeTruthsSceneText_();
+  return sceneTextFromBlocks_(
+    scene.scene_blocks_json || scene.blocks_json || scene.blocks,
+    scene.narrative_text
+  );
+}
+
+function sceneBlocksFrom_(raw) {
+  var value = raw;
+  if (typeof value === 'string') value = parseJson_(value, null);
+  if (!Array.isArray(value)) return [];
+
+  return value.map(function (block) {
+    if (typeof block === 'string') {
+      return { type: 'prose', text: block };
+    }
+    if (!block || typeof block !== 'object') return null;
+    return {
+      type: block.type || block.kind || 'prose',
+      speaker: block.speaker || '',
+      text: block.text || block.content || ''
+    };
+  }).filter(function (block) {
+    return block && String(block.text || '').trim() !== '';
+  });
+}
+
+function sceneTextFromBlocks_(raw, fallback) {
+  var blocks = sceneBlocksFrom_(raw);
+  if (!blocks.length) {
+    return String(fallback || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
   }
-  return String(scene.narrative_text || '');
+
+  return blocks.map(function (block) {
+    var text = String(block.text || '').trim();
+    var type = String(block.type || 'prose').toLowerCase();
+    if (type === 'dialogue' && String(block.speaker || '').trim()) {
+      var dialogue = text.replace(/^„|“$/g, '').trim();
+      return String(block.speaker).trim() + ': „' + dialogue + '“';
+    }
+    if (type === 'system') return 'SYSTEM: ' + text;
+    return text;
+  }).filter(function (text) {
+    return !!text;
+  }).join('\n\n');
+}
+
+function sceneBlocksForOverlay_(scene) {
+  return sceneBlocksFrom_(
+    scene && (scene.scene_blocks_json || scene.blocks_json || scene.blocks)
+  );
+}
+
+
+function validateSceneBlocks_(scene) {
+  if (!scene) return;
+  var raw = scene.scene_blocks_json !== undefined
+    ? scene.scene_blocks_json
+    : (scene.blocks_json !== undefined ? scene.blocks_json : scene.blocks);
+  if (raw === undefined || raw === null || raw === '') return;
+
+  var blocks = typeof raw === 'string' ? parseJson_(raw, null) : raw;
+  if (!Array.isArray(blocks)) {
+    throw new Error('scene blocks must be an array or JSON array.');
+  }
+
+  blocks.forEach(function (block, index) {
+    if (typeof block === 'string') {
+      if (!block.trim()) throw new Error('scene block ' + index + ' cannot be empty.');
+      return;
+    }
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      throw new Error('scene block ' + index + ' must be an object or string.');
+    }
+    if (!String(block.text || block.content || '').trim()) {
+      throw new Error('scene block ' + index + ' requires text or content.');
+    }
+    if (block.speaker !== undefined && typeof block.speaker !== 'string') {
+      throw new Error('scene block ' + index + ' speaker must be text.');
+    }
+  });
 }
 
 function isSceneCorrection_(event) {
@@ -631,6 +773,7 @@ function validateSceneCorrection_(event) {
       !Array.isArray(event.scene.available_actions_json)) {
     throw new Error('scene.available_actions_json must be an array');
   }
+  validateSceneBlocks_(event.scene);
 }
 
 function commitSceneCorrection_(event) {
@@ -682,6 +825,7 @@ function commitSceneCorrection_(event) {
       'portraits_json',
       'map_delta_json',
       'relationship_delta_json',
+      'scene_blocks_json',
       'status',
       'content_rating',
       'intimacy_mode'
@@ -811,6 +955,7 @@ function commitTurn_(event, options) {
         title: event.scene.title || 'Neue Szene',
         location_id: event.scene.location_id || stateValue_(getStateMap_(), 'player.location_id') || 'PRISON_CITY',
         narrative_text: event.scene.narrative_text || event.narrative_summary,
+        scene_blocks_json: jsonString_(event.scene.scene_blocks_json || event.scene.blocks_json || event.scene.blocks || []),
         mood: event.scene.mood || 'mysteriös / wandelnd',
         visible_changes_json: jsonString_(event.scene.visible_changes_json || {}),
         available_actions_json: jsonString_(event.scene.available_actions_json || []),
@@ -860,45 +1005,46 @@ function applyStateUpdates_(updates, eventId, now) {
   var conditionDuration;
 
   Object.keys(updates).forEach(function(key) {
+    key = canonicalStateKey_(key);
     var value = updates[key];
     switch (key) {
-      case 'world_location_id':
+      case 'player.location_id':
         updateStateKey_('player.location_id', value, 'text', 'runtime state', eventId, now);
         break;
-      case 'character_known_identity':
+      case 'player.known_identity':
         updateStateKey_('player.known_identity', value, 'text', 'runtime state', eventId, now);
         break;
-      case 'health':
+      case 'player.health':
         updateStateKey_('player.health', numericHealth_(value), 'number', 'runtime state', eventId, now);
         break;
-      case 'health_max':
+      case 'player.health_max':
         updateStateKey_('player.health_max', numericValue_(value, 10), 'number', 'runtime state', eventId, now);
         break;
-      case 'world_clock':
+      case 'world.clock':
         updateStateKey_('world.clock', numericValue_(value, value), 'number', 'runtime state', eventId, now);
         break;
-      case 'elapsed_minutes':
+      case 'world.elapsed_minutes':
         updateStateKey_('world.elapsed_minutes', numericValue_(value, value), 'number', 'runtime state', eventId, now);
         break;
-      case 'resonance_stage':
+      case 'player.resonance_stage':
         updateStateKey_('player.resonance_stage', value, 'text', 'runtime state', eventId, now);
         break;
-      case 'equipment_main_hand':
+      case 'player.equipment_main_hand':
         updateStateKey_('player.equipment_main_hand', value, 'text', 'runtime state', eventId, now);
         break;
-      case 'held_item':
+      case 'player.held_item':
         updateStateKey_('player.held_item', value, 'text', 'runtime state', eventId, now);
         break;
-      case 'player_posture':
+      case 'player.posture':
         updateStateKey_('player.posture', value, 'text', 'runtime state', eventId, now);
         break;
-      case 'inventory':
+      case 'player.inventory':
         updateStateKey_('player.inventory', value, 'json', 'runtime state', eventId, now);
         break;
-      case 'known_facts':
+      case 'player.known_facts':
         updateStateKey_('player.known_facts', value, 'json', 'runtime state', eventId, now);
         break;
-      case 'conditions':
+      case 'player.conditions':
         updateStateKey_('player.conditions', value, 'json', 'runtime state', eventId, now);
         break;
       case 'inventory_added':
@@ -957,6 +1103,7 @@ function applyRelationshipUpdates_(updates, eventId, now) {
 }
 
 function updateStateKey_(key, value, valueType, scope, eventId, now) {
+  key = canonicalStateKey_(key);
   var sheet = getSheet_(ECHO_CONFIG.sheets.state);
   var row = findRow_(sheet, 'state_key', key);
   var formatted = serializeValue_(value);
@@ -1096,6 +1243,7 @@ function getOverlayState_() {
   var healthMax = numberOrBlank_(stateValue_(state, 'player.health_max'));
   if (healthMax === '' || healthMax <= 0) healthMax = 10;
   var conditions = parseList_(stateValue_(state, 'player.conditions'), []);
+  var itemOwnership = itemOwnershipProjection_(state, overlayWarnings);
   var echoMastery = echoMasteryValue_(stateValue_(state, 'player.echo_mastery_profile'));
   var memoryState = localizeMemory_(stateValue_(state, 'player.memory_state') || 'NO_MEMORY');
   var currentLocation = locationLabel_(locationId);
@@ -1105,6 +1253,7 @@ function getOverlayState_() {
     title: scene.title || 'Aktuelle Szene',
     moodTag: localizeMood_(scene.mood || 'unbestimmt'),
     text: sceneTextForOverlay_(scene) || 'Noch keine sichtbare Szene im persistenten Spielstand.',
+    blocks: sceneBlocksForOverlay_(scene),
     sceneType: scene.scene_type || 'narrative',
     contentRating: scene.content_rating || '',
     intimacyMode: scene.intimacy_mode || '',
@@ -1118,7 +1267,8 @@ function getOverlayState_() {
 
   return {
     source: 'google-apps-script',
-    stateModelVersion: '2.1',
+    stateModelVersion: ECHO_STATE_MODEL_VERSION,
+    build: ECHO_BUILD_ID,
     overlayWarnings: overlayWarnings,
     generated_at: new Date().toISOString(),
     currentScene: currentScene,
@@ -1149,7 +1299,7 @@ function getOverlayState_() {
         : String(currentHealth) + ' von ' + String(healthMax) + ' Lebensenergie.',
       conditions: conditions,
       equipmentMainHand: stateValue_(state, 'player.equipment_main_hand') || '',
-      heldItem: stateValue_(state, 'player.held_item') || '',
+      heldItem: itemOwnership.playerHeldItem || '',
       posture: stateValue_(state, 'player.posture') || ''
     },
     stateSummary: {
@@ -1165,6 +1315,7 @@ function getOverlayState_() {
     },
     knownFacts: parseList_(stateValue_(state, 'player.known_facts'), []),
     inventory: inventoryFrom_(stateValue_(state, 'player.inventory')),
+    itemOwnership: itemOwnership.items,
     relationships: echoRelationshipOverlays_(relationshipRows, preferenceContext.characters),
 
     relationshipProfiles: preferenceContext.characters
@@ -1195,7 +1346,12 @@ function readOverlayRows_(sheetName, warnings) {
 
 function latestBySequence_(rows) {
   return rows.slice().sort(function (a, b) {
-    return Number(b.sequence || 0) - Number(a.sequence || 0);
+    var sequenceDiff = Number(b.sequence || 0) - Number(a.sequence || 0);
+    if (sequenceDiff) return sequenceDiff;
+    var timeDiff = stateTimestamp_(b.updated_at || b.timestamp) -
+      stateTimestamp_(a.updated_at || a.timestamp);
+    if (timeDiff) return timeDiff;
+    return Number(b.__rowNumber || 0) - Number(a.__rowNumber || 0);
   })[0] || null;
 }
 
@@ -1517,6 +1673,82 @@ function chronicleFrom_(scenes, events) {
   return entries;
 }
 
+
+function normalizedItemIdentity_(item) {
+  if (item && typeof item === 'object') {
+    return String(item.item_id || item.id || item.name || item.label || '').trim();
+  }
+  return String(item || '').trim();
+}
+
+function inventoryContainsItem_(inventory, itemId) {
+  var target = String(itemId || '').trim();
+  return (Array.isArray(inventory) ? inventory : []).some(function (item) {
+    return normalizedItemIdentity_(item) === target;
+  });
+}
+
+function itemOwnershipProjection_(state, warnings) {
+  var inventory = parseList_(stateValue_(state, 'player.inventory'), []);
+  var owners = {};
+
+  function add(itemId, ownerEntityId, source) {
+    var id = normalizedItemIdentity_(itemId);
+    if (!id) return;
+    var existing = owners[id];
+    if (existing && existing.ownerEntityId !== ownerEntityId) {
+      existing.conflict = true;
+      warnings.push({
+        code: 'CONSISTENCY_WARNING',
+        field: 'item_owner',
+        item_id: id,
+        message: 'Mehrere Besitzer für denselben Gegenstand: ' + id
+      });
+      // A future ITEM_STATE row will become authoritative. Until then the
+      // first confirmed projection remains visible and the conflict is explicit.
+      return;
+    }
+    owners[id] = existing || {
+      itemId: id,
+      ownerEntityId: ownerEntityId,
+      source: source,
+      conflict: false
+    };
+  }
+
+  inventory.forEach(function (item) {
+    add(item, 'PLAYER', 'player.inventory');
+  });
+
+  var playerHeld = String(stateValue_(state, 'player.held_item') || '').trim();
+  if (playerHeld && inventoryContainsItem_(inventory, playerHeld)) {
+    add(playerHeld, 'PLAYER', 'player.held_item');
+  } else if (playerHeld) {
+    warnings.push({
+      code: 'CONSISTENCY_WARNING',
+      field: 'player.held_item',
+      item_id: playerHeld,
+      message: 'player.held_item wird ignoriert, weil der Gegenstand nicht im Spielerinventar liegt.'
+    });
+  }
+
+  Object.keys(state || {}).forEach(function (key) {
+    if (!/^[A-Za-z0-9_-]+\.held_item$/.test(key) || key === 'player.held_item') return;
+    var held = String(stateValue_(state, key) || '').trim();
+    if (held) add(held, key.replace(/\.held_item$/, ''), key);
+  });
+
+  var items = Object.keys(owners).map(function (id) { return owners[id]; });
+  var projectedPlayerHeld = items.filter(function (item) {
+    return item.ownerEntityId === 'PLAYER' && item.source === 'player.held_item';
+  })[0];
+
+  return {
+    playerHeldItem: projectedPlayerHeld ? projectedPlayerHeld.itemId : '',
+    items: items
+  };
+}
+
 function inventoryFrom_(raw) {
   var list = parseJson_(raw, []);
   if (!Array.isArray(list)) return [];
@@ -1640,11 +1872,25 @@ function localizeMemory_(value) {
 
 function echoMasteryValue_(raw) {
   var parsed = parseJson_(raw, null);
-  if (parsed && typeof parsed === 'object') {
-    var candidate = parsed.percent !== undefined ? parsed.percent : (parsed.mastery !== undefined ? parsed.mastery : parsed.value);
-    if (candidate !== undefined && isFinite(Number(candidate))) return Number(candidate);
-  }
-  return isFinite(Number(raw)) && raw !== '' ? Number(raw) : 0;
+  var candidate = parsed && typeof parsed === 'object'
+    ? (parsed.percent !== undefined ? parsed.percent : (parsed.mastery !== undefined ? parsed.mastery : parsed.value))
+    : raw;
+  var number = Number(candidate);
+  return isFinite(number) ? Math.max(0, Math.min(100, number)) : 0;
+}
+
+
+function echoGetDiagnostics_() {
+  var preference = validateEchoPreferenceStorage_({ repair: false });
+  return {
+    ok: preference.ok,
+    build: ECHO_BUILD_ID,
+    state_model_version: ECHO_STATE_MODEL_VERSION,
+    preference_policy_version: ECHO_PREFERENCE_POLICY_VERSION,
+    preference_coverage: preference.preferenceCoverage,
+    errors: preference.errors,
+    warnings: preference.warnings
+  };
 }
 
 // ===== Fast Turn Gateway =====
@@ -1653,30 +1899,31 @@ function echoMasteryValue_(raw) {
 // Public, secret-free reference implementation.
 // Live spreadsheet IDs, deployment URLs and tokens belong in Script Properties.
 
-const ECHO_FAST_GATEWAY_VERSION = '1.1.0';
+const ECHO_FAST_GATEWAY_VERSION = '1.2.0';
 
 const ECHO_FAST_DEFAULT_RUNTIME_KEYS = [
   'save.last_event_id',
-  'world_location_id',
-  'character_known_identity',
-  'health',
-  'resonance_stage',
-  'world_clock',
-  'elapsed_minutes',
-  'player_posture',
-  'equipment_main_hand',
-  'held_item',
-  'clothing_state',
-  'seal_threshold_state',
-  'condition_added',
-  'condition_duration_scenes',
-  'inventory_updates',
-  'player.conditions',
-  'player.health_current',
+  'player.location_id',
+  'player.known_identity',
+  'player.health',
   'player.health_max',
+  'player.resonance_stage',
+  'player.memory_state',
+  'player.posture',
   'player.equipment_main_hand',
   'player.held_item',
-  'world.elapsed_minutes'
+  'player.clothing_state',
+  'player.seal_threshold_state',
+  'player.inventory',
+  'player.known_facts',
+  'player.conditions',
+  'player.echo_mastery_profile',
+  'player.active_relationships',
+  'world.clock',
+  'world.elapsed_minutes',
+  'world.known_regions',
+  'story.chapter_id',
+  'story.chapter_label'
 ];
 
 /** Compact canonical context for resolving the next player turn. */
@@ -1692,14 +1939,22 @@ function echoGetRuntimeContext() {
     if (Object.prototype.hasOwnProperty.call(state, key)) compact[key] = state[key];
   });
 
+  const preferences = getEchoPreferenceContext_({ includeAudit: true });
+
   return {
     ok: true,
     version: ECHO_FAST_GATEWAY_VERSION,
+    build: ECHO_BUILD_ID,
+    context_version: 'phase-1',
+    state_model_version: ECHO_STATE_MODEL_VERSION,
     commit_ready: !lastTurn || lastTurn.validation_status === 'COMMITTED',
     last_turn: lastTurn,
     snapshot: compact,
+    authority: ECHO_AUTHORITY_ORDER_.slice(),
     chat_delivery: echoChatDeliveryPolicy_(),
-    preferences: getEchoPreferenceContext_({ includeAudit: true })
+    preference_policy: preferences.effectivePolicy,
+    preference_coverage: preferences.preferenceCoverage,
+    preferences: preferences
   };
 }
 
@@ -1842,8 +2097,24 @@ function echoFastRequireSheet_(ss, name) {
 }
 
 function echoFastReadLatestInboxRow_(sheet) {
-  const row = sheet.getLastRow();
-  return row >= 2 ? echoFastReadInboxRow_(sheet, row) : null;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  const values = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
+  let latest = null;
+  values.forEach(function (value, index) {
+    if (!String(value[0] || '').trim()) return;
+    const candidate = echoFastReadInboxRow_(sheet, index + 2);
+    if (!latest || echoFastInboxRowIsLater_(candidate, latest)) latest = candidate;
+  });
+  return latest;
+}
+
+function echoFastInboxRowIsLater_(candidate, current) {
+  var candidateTime = stateTimestamp_(candidate && candidate.received_at);
+  var currentTime = stateTimestamp_(current && current.received_at);
+  if (candidateTime !== currentTime) return candidateTime > currentTime;
+  return Number(candidate && candidate.row || 0) > Number(current && current.row || 0);
 }
 
 function echoFastReadInboxRow_(sheet, row) {
@@ -1856,6 +2127,7 @@ function echoFastReadInboxRow_(sheet, row) {
   }
 
   return {
+    row: row,
     turn_id: echoFastJsonValue_(v[0]),
     chat_id: echoFastJsonValue_(v[1]),
     received_at: echoFastJsonValue_(v[2]),
@@ -1870,29 +2142,76 @@ function echoFastReadInboxRow_(sheet, row) {
 }
 
 function echoFastReadSnapshotMap_(sheet) {
-  const lastRow = sheet.getLastRow();
-  const out = {};
-  if (lastRow < 2) return out;
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) return {};
 
-  sheet.getRange(2, 1, lastRow - 1, 2).getValues().forEach(function (row) {
-    const key = String(row[0] || '').trim();
-    if (key) out[key] = echoFastJsonValue_(row[1]); // newest duplicate wins
+  const headers = values[0].map(function (value) {
+    return String(value || '').trim();
   });
+  const keyIndex = headers.indexOf('state_key');
+  const valueIndex = headers.indexOf('value');
+  const typeIndex = headers.indexOf('value_type');
+  const updatedIndex = headers.indexOf('updated_at');
+  if (keyIndex === -1 || valueIndex === -1) return {};
 
+  const latest = {};
+  for (let index = 1; index < values.length; index++) {
+    const row = values[index];
+    const rawKey = String(row[keyIndex] || '').trim();
+    if (!rawKey || isLegacyStateKey_(rawKey)) continue;
+
+    const candidate = {
+      value: row[valueIndex],
+      value_type: typeIndex === -1 ? '' : row[typeIndex],
+      updated_at: updatedIndex === -1 ? '' : row[updatedIndex],
+      __rowNumber: index + 1
+    };
+    if (recordIsNewer_(candidate, latest[rawKey])) latest[rawKey] = candidate;
+  }
+
+  const out = {};
+  Object.keys(latest).forEach(function (key) {
+    out[key] = echoFastSnapshotValue_(
+      latest[key].value,
+      latest[key].value_type
+    );
+  });
   return out;
+}
+
+function echoFastSnapshotValue_(value, valueType) {
+  var type = String(valueType || '').toLowerCase();
+  if (type === 'json' || type === 'object' || type === 'array') {
+    if (value && typeof value === 'object') return value;
+    return parseJson_(value, value);
+  }
+  if (type === 'number') {
+    var number = Number(value);
+    return isFinite(number) ? number : value;
+  }
+  if (type === 'boolean') return String(value).toLowerCase() === 'true';
+  return echoFastJsonValue_(value);
 }
 
 function echoFastRuntimeKeys_() {
   const raw = PropertiesService.getScriptProperties().getProperty('ECHO_RUNTIME_KEYS_JSON');
-  if (!raw) return ECHO_FAST_DEFAULT_RUNTIME_KEYS.slice();
+  const keys = raw
+    ? (function () {
+        try {
+          var parsed = JSON.parse(raw);
+          if (!Array.isArray(parsed) || !parsed.length) throw new Error('invalid');
+          return parsed;
+        } catch (err) {
+          throw new Error('ECHO_RUNTIME_KEYS_JSON must be a non-empty JSON array.');
+        }
+      })()
+    : ECHO_FAST_DEFAULT_RUNTIME_KEYS.slice();
 
-  try {
-    const keys = JSON.parse(raw);
-    if (!Array.isArray(keys) || !keys.length) throw new Error('invalid');
-    return keys.map(function (value) { return String(value); });
-  } catch (err) {
-    throw new Error('ECHO_RUNTIME_KEYS_JSON must be a non-empty JSON array.');
-  }
+  return keys.map(function (value) {
+    return canonicalStateKey_(value);
+  }).filter(function (key, index, list) {
+    return !isLegacyStateKey_(key) && list.indexOf(key) === index;
+  });
 }
 
 function echoFastFindTurnRow_(sheet, turnId) {
@@ -2067,6 +2386,135 @@ var ECHO_CHARACTER_PATCH_FIELDS_ = {
   notes: true
 };
 
+
+var ECHO_PREFERENCE_COVERAGE_ = [
+  { id: 'q01', target: 'circle.structure', enforcement: 'SOFT', appliesWhen: 'group_context' },
+  { id: 'q02', target: 'circle.target_size', enforcement: 'SOFT', appliesWhen: 'group_progression' },
+  { id: 'q03', target: 'circle.role_distribution', enforcement: 'SOFT', appliesWhen: 'group_context' },
+  { id: 'q04', target: 'circle.joining_pace', enforcement: 'SOFT', appliesWhen: 'group_progression' },
+  { id: 'q05', target: 'circle.hierarchy', enforcement: 'SOFT', appliesWhen: 'group_context' },
+  { id: 'q06', target: 'narration.density', enforcement: 'SOFT', appliesWhen: 'every_scene' },
+  { id: 'q07', target: 'narration.dialogue_style', enforcement: 'SOFT', appliesWhen: 'every_scene' },
+  { id: 'q08', target: 'player_agency', enforcement: 'HARD', appliesWhen: 'every_turn' },
+  { id: 'q09', target: 'dice_policy', enforcement: 'HARD', appliesWhen: 'every_turn' },
+  { id: 'q10', target: 'delivery.format', enforcement: 'HARD', appliesWhen: 'every_delivery' },
+  { id: 'q11', target: 'intimacy.address_style', enforcement: 'SOFT', appliesWhen: 'relevant_character' },
+  { id: 'q12', target: 'intimacy.psychological_tension', enforcement: 'SOFT', appliesWhen: 'intimacy_scene' },
+  { id: 'q13', target: 'intimacy.control_and_restraint', enforcement: 'SOFT', appliesWhen: 'intimacy_scene' },
+  { id: 'q14', target: 'safety.consent_and_boundaries', enforcement: 'HARD', appliesWhen: 'every_intimacy_scene' },
+  { id: 'q15', target: 'intimacy.power_continuity', enforcement: 'SOFT', appliesWhen: 'relationship_scene' },
+  { id: 'q16', target: 'intimacy.edging_and_denial', enforcement: 'SOFT', appliesWhen: 'relevant_character' },
+  { id: 'q17', target: 'intimacy.explicitness_boundary', enforcement: 'HARD', appliesWhen: 'every_intimacy_scene' },
+  { id: 'q18', target: 'intimacy.aftercare', enforcement: 'SOFT', appliesWhen: 'after_intimacy' },
+  { id: 'q19', target: 'submission.service_and_worship', enforcement: 'SOFT', appliesWhen: 'relevant_character' },
+  { id: 'q20', target: 'submission.obedience', enforcement: 'SOFT', appliesWhen: 'relevant_character' },
+  { id: 'q21', target: 'submission.foot_focus_and_observation', enforcement: 'SOFT', appliesWhen: 'relevant_character' },
+  { id: 'q22', target: 'circle.power_model', enforcement: 'SOFT', appliesWhen: 'group_context' },
+  { id: 'q23', target: 'circle.player_centered_leadership', enforcement: 'SOFT', appliesWhen: 'group_context' },
+  { id: 'q24', target: 'circle.target_members', enforcement: 'SOFT', appliesWhen: 'group_progression' },
+  { id: 'q25', target: 'circle.women_relationships', enforcement: 'SOFT', appliesWhen: 'group_context' },
+  { id: 'q26', target: 'circle.guest_participation', enforcement: 'SOFT', appliesWhen: 'guest_context' },
+  { id: 'q27', target: 'circle.participant_constraints', enforcement: 'HARD', appliesWhen: 'every_participant' },
+  { id: 'q28', target: 'circle.adult_and_sentient_scope', enforcement: 'HARD', appliesWhen: 'every_participant' },
+  { id: 'q29', target: 'intensity.ceiling', enforcement: 'SOFT', appliesWhen: 'intensity_scene' },
+  { id: 'q30', target: 'intensity.darkness_style', enforcement: 'SOFT', appliesWhen: 'intensity_scene' },
+  { id: 'q31', target: 'intimacy.initiation_and_permission', enforcement: 'HARD', appliesWhen: 'every_intimacy_scene' },
+  { id: 'q32', target: 'intimacy.earned_rewards_and_denial', enforcement: 'SOFT', appliesWhen: 'relevant_character' },
+  { id: 'q33', target: 'narration.pacing', enforcement: 'SOFT', appliesWhen: 'every_scene' },
+  { id: 'q34', target: 'overlay.compactness', enforcement: 'PROJECTION', appliesWhen: 'overlay' },
+  { id: 'q35', target: 'overlay.numeric_stat_visibility', enforcement: 'HARD', appliesWhen: 'overlay_and_context' },
+  { id: 'q36', target: 'persistence.repairability', enforcement: 'HARD', appliesWhen: 'every_commit' },
+  { id: 'q37', target: 'relationships.conflict_repair', enforcement: 'SOFT', appliesWhen: 'relationship_conflict' },
+  { id: 'q38', target: 'relationships.discipline_contexts', enforcement: 'SOFT', appliesWhen: 'relevant_character' },
+  { id: 'q39', target: 'npc_autonomy', enforcement: 'HARD', appliesWhen: 'every_turn' },
+  { id: 'q40', target: 'relationships.per_character_stats', enforcement: 'PROJECTION', appliesWhen: 'relationship_overlay' },
+  { id: 'q41', target: 'relationships.progression', enforcement: 'SOFT', appliesWhen: 'relationship_scene' },
+  { id: 'q42', target: 'circle.growth', enforcement: 'SOFT', appliesWhen: 'group_progression' },
+  { id: 'q43', target: 'magic.first_expert', enforcement: 'SOFT', appliesWhen: 'echo_training' },
+  { id: 'q44', target: 'magic.teaching_path', enforcement: 'SOFT', appliesWhen: 'echo_training' },
+  { id: 'q45', target: 'magic.relationship_amplification', enforcement: 'SOFT', appliesWhen: 'magic_or_relationship_scene' },
+  { id: 'q46', target: 'magic.darkness_and_protection', enforcement: 'SOFT', appliesWhen: 'magic_or_protection_scene' },
+  { id: 'q47', target: 'magic.restoration_direction', enforcement: 'SOFT', appliesWhen: 'magic_progression' },
+  { id: 'q48', target: 'magic.resonance_charge', enforcement: 'SOFT', appliesWhen: 'magic_progression' },
+  { id: 'q49', target: 'magic.breakthroughs', enforcement: 'SOFT', appliesWhen: 'magic_progression' },
+  { id: 'q50', target: 'magic.distinct_experts', enforcement: 'SOFT', appliesWhen: 'group_progression' }
+];
+
+function validatePreferenceCoverage_(answers) {
+  var errors = [];
+  var warnings = [];
+  var missingQuestionIds = [];
+  var presentQuestions = 0;
+  var source = answers && typeof answers === 'object' && !Array.isArray(answers)
+    ? answers
+    : {};
+
+  ECHO_PREFERENCE_COVERAGE_.forEach(function (definition) {
+    if (Object.prototype.hasOwnProperty.call(source, definition.id)) {
+      presentQuestions += 1;
+    } else {
+      missingQuestionIds.push(definition.id);
+    }
+  });
+
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+    errors.push('PREF-026 questionnaire_answers is missing or not an object.');
+  }
+  if (missingQuestionIds.length) {
+    errors.push('Missing questionnaire answers: ' + missingQuestionIds.join(', '));
+  }
+
+  return {
+    totalQuestions: ECHO_PREFERENCE_COVERAGE_.length,
+    presentQuestions: presentQuestions,
+    missingQuestionIds: missingQuestionIds,
+    complete: missingQuestionIds.length === 0 && !!answers,
+    errors: errors,
+    warnings: warnings
+  };
+}
+
+function compileEffectivePreferencePolicy_(player, group, characterPreferences, answers, includeQuestionValues) {
+  var source = answers && typeof answers === 'object' && !Array.isArray(answers)
+    ? answers
+    : {};
+  var questionRules = {};
+
+  ECHO_PREFERENCE_COVERAGE_.forEach(function (definition) {
+    var rule = {
+      target: definition.target,
+      enforcement: definition.enforcement,
+      appliesWhen: definition.appliesWhen,
+      sourceRef: 'PREF-026.' + definition.id
+    };
+    if (includeQuestionValues && Object.prototype.hasOwnProperty.call(source, definition.id)) {
+      rule.answer = source[definition.id];
+    }
+    questionRules[definition.id] = rule;
+  });
+
+  return {
+    version: ECHO_PREFERENCE_POLICY_VERSION,
+    source: 'ECHO_PREFERENCE_PROFILE/PREF-026',
+    coverage: validatePreferenceCoverage_(answers),
+    questionRules: questionRules,
+    hardConstraints: {
+      stopWord: 'Stopp',
+      explicitDiceOverride: 'ohne Würfel',
+      defaultDice: 'W20',
+      playerStoryAgency: true,
+      npcAutonomy: true,
+      consentRequired: true,
+      noInventedNumericStats: true,
+      adultSentientHumanoidScope: true
+    },
+    precedence: ECHO_AUTHORITY_ORDER_.slice(),
+    player: player || {},
+    group: group || {},
+    characters: characterPreferences || {}
+  };
+}
+
 function ensurePreferenceSheets_() {
   var preferenceSheet = ensureProfileSheetWithHeaders_(
     ECHO_CONFIG.sheets.preferences,
@@ -2195,12 +2643,14 @@ function profileId_(prefix) {
   return String(prefix || 'PROFILE') + '-' + uuid.slice(0, 16);
 }
 
-function validateEchoPreferenceStorage_() {
+function validateEchoPreferenceStorage_(options) {
+  options = options || {};
   var errors = [];
   var warnings = [];
+  var questionnaireAnswers = null;
 
   try {
-    ensurePreferenceSheets_();
+    if (options.repair !== false) ensurePreferenceSheets_();
 
     var preferenceTable = readTable_(getSheet_(ECHO_CONFIG.sheets.preferences));
     ECHO_PREFERENCE_HEADERS_.forEach(function (header) {
@@ -2220,6 +2670,10 @@ function validateEchoPreferenceStorage_() {
       if (!scope || !subjectId || !category || !key) {
         errors.push('Active preference row is missing scope, subject, category or key.');
         return;
+      }
+
+      if (category === 'audit' && key === 'questionnaire_answers') {
+        questionnaireAnswers = profileValue_(row.value_json, row.value_type);
       }
 
       var identity = [scope, subjectId, category, key].join('|');
@@ -2275,10 +2729,15 @@ function validateEchoPreferenceStorage_() {
     errors.push(String(error && error.message ? error.message : error));
   }
 
+  var preferenceCoverage = validatePreferenceCoverage_(questionnaireAnswers);
+  errors = errors.concat(preferenceCoverage.errors);
+  warnings = warnings.concat(preferenceCoverage.warnings);
+
   return {
     ok: errors.length === 0,
     errors: errors,
-    warnings: warnings
+    warnings: warnings,
+    preferenceCoverage: preferenceCoverage
   };
 }
 
@@ -2288,7 +2747,8 @@ function readCharacterProfiles_() {
 
   rows.forEach(function (row) {
     if (!echoProfileStatusIsActive_(row.status) || !row.entity_id) return;
-    newestByEntity[String(row.entity_id)] = row;
+    var entityId = String(row.entity_id);
+    if (recordIsNewer_(row, newestByEntity[entityId])) newestByEntity[entityId] = row;
   });
 
   return Object.keys(newestByEntity).map(function (entityId) {
@@ -2378,12 +2838,18 @@ function characterProfileToOverlay_(profile) {
 
 function getEchoPreferenceContext_(options) {
   options = options || {};
-  var validation = validateEchoPreferenceStorage_();
-  var preferenceRows = readTable_(getSheet_(ECHO_CONFIG.sheets.preferences)).rows;
+  var validation = validateEchoPreferenceStorage_({ repair: false });
+  var preferenceRows = [];
+  try {
+    preferenceRows = readTable_(getSheet_(ECHO_CONFIG.sheets.preferences)).rows;
+  } catch (error) {
+    validation.errors.push(String(error && error.message ? error.message : error));
+  }
+
   var player = {};
   var group = {};
   var characterPreferences = {};
-  var audit = null;
+  var rawAudit = null;
   var profileVersion = ECHO_PREFERENCE_SCHEMA_VERSION;
   var seen = {};
 
@@ -2417,42 +2883,53 @@ function getEchoPreferenceContext_(options) {
       setNestedPreference_(characterPreferences[subjectId], path, value);
     }
 
-    if (
-      options.includeAudit &&
-      category === 'audit' &&
-      key === 'questionnaire_answers'
-    ) {
-      audit = value;
+    if (category === 'audit' && key === 'questionnaire_answers') {
+      rawAudit = value;
     }
   });
 
-  var characters = readCharacterProfiles_();
+  var characters = [];
+  try {
+    characters = readCharacterProfiles_();
+  } catch (error) {
+    validation.errors.push(String(error && error.message ? error.message : error));
+  }
+
   characters.forEach(function (profile) {
     profile.preferences = characterPreferences[profile.entityId] || {};
   });
 
+  var preferenceCoverage = validatePreferenceCoverage_(rawAudit);
+  var effectivePolicy = compileEffectivePreferencePolicy_(
+    player,
+    group,
+    characterPreferences,
+    rawAudit,
+    !!options.includeAudit
+  );
+
+  validation.errors = validation.errors.concat(preferenceCoverage.errors);
+  validation.warnings = validation.warnings.concat(preferenceCoverage.warnings);
+
   return {
     available: true,
-    status: validation.ok ? 'READY' : 'DEGRADED',
+    status: validation.ok && preferenceCoverage.complete ? 'READY' : 'DEGRADED',
     schemaVersion: ECHO_PREFERENCE_SCHEMA_VERSION,
+    policyVersion: ECHO_PREFERENCE_POLICY_VERSION,
     profileVersion: profileVersion,
     profileSource: 'ECHO_PREFERENCE_PROFILE',
     characterSource: 'ECHO_CHARACTER_PROFILES',
     readOnEveryTurn: true,
-    precedence: [
-      'player_profile',
-      'group_profile',
-      'character_profile',
-      'relationship_state',
-      'current_scene'
-    ],
+    precedence: ECHO_AUTHORITY_ORDER_.slice(),
     player: player,
     group: group,
     characterPreferences: characterPreferences,
     characters: characters,
-    audit: options.includeAudit ? audit : null,
+    preferenceCoverage: preferenceCoverage,
+    effectivePolicy: effectivePolicy,
+    audit: options.includeAudit ? rawAudit : null,
     validation: {
-      ok: validation.ok,
+      ok: validation.ok && preferenceCoverage.complete,
       errors: validation.errors,
       warnings: validation.warnings
     },
@@ -2462,7 +2939,9 @@ function getEchoPreferenceContext_(options) {
       npc_autonomy_enabled: true,
       default_dice: 'W20',
       author_override_phrase: 'ohne Würfel',
-      stop_word_always_valid: 'Stopp'
+      stop_word_always_valid: 'Stopp',
+      authority_order: ECHO_AUTHORITY_ORDER_.slice(),
+      preference_policy_version: ECHO_PREFERENCE_POLICY_VERSION
     }
   };
 }
@@ -2474,7 +2953,7 @@ function echoGetPreferenceContext() {
 
 /** Public diagnostics endpoint for the profile schema. */
 function echoValidatePreferenceProfile() {
-  return validateEchoPreferenceStorage_();
+  return validateEchoPreferenceStorage_({ repair: false });
 }
 
 function validatePreferenceUpdates_(updates) {
