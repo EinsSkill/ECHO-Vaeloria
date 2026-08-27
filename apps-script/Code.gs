@@ -24,12 +24,45 @@ var ECHO_CONFIG = {
   }
 };
 
+var ECHO_CHAT_DELIVERY_POLICY = {
+  version: '1.0.0',
+  mode: 'OVERLAY_ONLY',
+  chat_response_mode: 'ACK_ONLY',
+  narrative_destination: 'SCENE_FEED',
+  overlay_response_mode: 'FULL_NARRATIVE',
+  acknowledgement_on_success: 'Übertragen.',
+  failure_response: 'Fehler kurz melden; keine Erzählung im Chat ausgeben.',
+  completion_rule: 'ACK_ONLY_AFTER_COMMIT_AND_READBACK',
+  processing_mode: 'THOROUGH_PERSISTENCE_AND_CONSISTENCY_CHECK',
+  preferred_quality_window: '2–3 Minuten interne Prüfung, sofern der Zug es erfordert',
+  include_narrative_in_chat: false
+};
+
+function echoChatDeliveryPolicy_() {
+  return {
+    version: ECHO_CHAT_DELIVERY_POLICY.version,
+    mode: ECHO_CHAT_DELIVERY_POLICY.mode,
+    chat_response_mode: ECHO_CHAT_DELIVERY_POLICY.chat_response_mode,
+    narrative_destination: ECHO_CHAT_DELIVERY_POLICY.narrative_destination,
+    overlay_response_mode: ECHO_CHAT_DELIVERY_POLICY.overlay_response_mode,
+    acknowledgement_on_success: ECHO_CHAT_DELIVERY_POLICY.acknowledgement_on_success,
+    failure_response: ECHO_CHAT_DELIVERY_POLICY.failure_response,
+    completion_rule: ECHO_CHAT_DELIVERY_POLICY.completion_rule,
+    processing_mode: ECHO_CHAT_DELIVERY_POLICY.processing_mode,
+    preferred_quality_window: ECHO_CHAT_DELIVERY_POLICY.preferred_quality_window,
+    include_narrative_in_chat: ECHO_CHAT_DELIVERY_POLICY.include_narrative_in_chat
+  };
+}
+
 /** Web-app entry point. GET is read-only except for processing queued turns. */
 
 function doGet(e) {
   var action = e && e.parameter ? String(e.parameter.action || '') : '';
   if (action === 'health') {
     return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0' });
+  }
+  if (action === 'delivery-policy') {
+    return jsonOutput_(echoGetChatDeliveryPolicy());
   }
   if (action === 'preferences') {
     return jsonOutput_(echoGetPreferenceContext_({ includeAudit: true }));
@@ -1134,7 +1167,12 @@ function getOverlayState_() {
     inventory: inventoryFrom_(stateValue_(state, 'player.inventory')),
     relationships: echoRelationshipOverlays_(relationshipRows, preferenceContext.characters),
 
-    relationshipProfiles: preferenceContext.characters.map(characterProfileToOverlay_),
+    relationshipProfiles: preferenceContext.characters
+      .filter(function (profile) {
+        return !isTechnicalRelationshipPlaceholder_({ entity_b: profile.entityId });
+      })
+      .map(characterProfileToOverlay_),
+    chatDelivery: echoChatDeliveryPolicy_(),
     preferenceContext: preferenceContext,
     threads: threadRows.filter(isVisibleThread_).map(threadToOverlay_),
     mapRegions: mapRegions_(state, locationId),
@@ -1174,11 +1212,145 @@ function isVisibleThread_(row) {
   return status !== 'ARCHIVED' && status !== 'HIDDEN';
 }
 
+
+function relationshipNote_(row, profile) {
+  var note = String((row && row.notes) || (profile && profile.notes) || '').trim();
+  var normalized = note.toLowerCase();
+
+  if (
+    normalized.indexOf('current numerical state') !== -1 ||
+    normalized.indexOf('numerischer beziehungszustand') !== -1 ||
+    normalized.indexOf('profil angelegt') !== -1
+  ) {
+    return 'Profil hinterlegt; numerische Beziehungswerte werden erst durch ausgespielte Ereignisse festgelegt.';
+  }
+
+  return note;
+}
+
+function profileHasDisplayData_(profile) {
+  if (!profile) return false;
+
+  return !!(
+    profile.displayName ||
+    profile.groupRole ||
+    profile.primaryExpertise ||
+    profile.secondaryExpertise ||
+    profile.initiationStyle ||
+    profile.aftercareStyle ||
+    (Array.isArray(profile.dominanceStyles) && profile.dominanceStyles.length) ||
+    (Array.isArray(profile.intimacyStyles) && profile.intimacyStyles.length) ||
+    (Array.isArray(profile.boundaries) && profile.boundaries.length) ||
+    Object.keys(profile.magicResonance || {}).length ||
+    Object.keys(profile.groupPosition || {}).length ||
+    Object.keys(profile.preferences || {}).length
+  );
+}
+
+function localizeRelationshipProfileText_(value) {
+  var text = String(value || '').trim();
+  var labels = {
+    stable_high_with_growing_teacher_student_intimacy_and_personal_vulnerability:
+      'hoch und stabil; persönliche Verletzlichkeit und Lehrer-Schüler-Intimität wachsen',
+    deepening_through_personal_truth_and_stillness_under_guidance:
+      'vertieft sich durch persönliche Wahrheiten und stilles Befolgen ihrer Führung',
+    very_strong_mutual_dark_romance_tension_nonexplicit:
+      'sehr starke gegenseitige Dark-Romance-Spannung (nicht grafisch)',
+    controlled_dark_romance_tension:
+      'kontrollierte Dark-Romance-Spannung',
+    truth_shared_and_stillness_under_guidance_continues:
+      'Wahrheit geteilt; stille Führung setzt sich fort'
+  };
+
+  if (labels[text]) return labels[text];
+  return /^[a-z0-9_-]+$/.test(text) ? text.replace(/_/g, ' ') : text;
+}
+
+function relationshipTextValue_(value) {
+  if (value === undefined || value === null || value === '') return '';
+
+  if (Array.isArray(value)) {
+    return value.map(relationshipTextValue_).filter(function (item) {
+      return !!item;
+    }).join(', ');
+  }
+
+  if (typeof value === 'object') {
+    var candidate = value.label || value.text || value.description || value.value;
+    if (candidate !== undefined && candidate !== null && candidate !== '') {
+      return relationshipTextValue_(candidate);
+    }
+    return JSON.stringify(value);
+  }
+
+  return localizeRelationshipProfileText_(value);
+}
+
+function relationshipQualitativeStats_(row, profile, intimacyProfile) {
+  var sources = [];
+
+  function addSource(source) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return;
+    sources.push(source);
+    ['relationship', 'relationship_state', 'qualitative', 'intimacy'].forEach(function (key) {
+      if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+        sources.push(source[key]);
+      }
+    });
+  }
+
+  addSource(intimacyProfile);
+  addSource(row || {});
+  addSource(profile && profile.relationshipAxes);
+  addSource(profile && profile.preferences);
+
+  var definitions = [
+    { key: 'trust', label: 'Vertrauen', sourceKeys: ['trust'] },
+    { key: 'desire', label: 'Verlangen', sourceKeys: ['desire'] },
+    { key: 'respect', label: 'Respekt', sourceKeys: ['respect'] },
+    { key: 'tension', label: 'Spannung', sourceKeys: ['tension'] },
+    { key: 'intimacy', label: 'Intimität', sourceKeys: ['intimacy'] },
+    { key: 'fear', label: 'Angst', sourceKeys: ['fear'] },
+    { key: 'dominance', label: 'Dominanz', sourceKeys: ['dominance'] },
+    { key: 'resonance', label: 'Resonanz', sourceKeys: ['resonance'] },
+    { key: 'teaching', label: 'Lehre', sourceKeys: ['teaching'] },
+    { key: 'phase', label: 'Phase', sourceKeys: ['phase', 'intimacy_phase'] },
+    { key: 'latest_truth', label: 'Letzte Wahrheit', sourceKeys: ['latest_truth'] },
+    { key: 'summary', label: 'Einordnung', sourceKeys: ['summary', 'relationship_summary', 'current_summary'] }
+  ];
+
+  return definitions.map(function (definition) {
+    var found = null;
+
+    for (var i = 0; i < sources.length && found === null; i++) {
+      for (var k = 0; k < definition.sourceKeys.length; k++) {
+        var candidate = sources[i][definition.sourceKeys[k]];
+        if (candidate === undefined || candidate === null || candidate === '') continue;
+        if (typeof candidate === 'number') continue;
+
+        var valueText = relationshipTextValue_(candidate);
+        if (!valueText || valueText.toLowerCase() === 'unknown') continue;
+        found = {
+          key: definition.key,
+          label: definition.label,
+          value: candidate,
+          valueText: valueText
+        };
+        break;
+      }
+    }
+
+    return found;
+  }).filter(function (item) {
+    return !!item;
+  });
+}
+
 function relationshipToOverlay_(row, profile) {
   row = row || {};
   profile = profile || {};
   var profileAxes = profile.relationshipAxes || {};
-  var intimacyProfile = parseJson_(row.intimacy_profile_json, {});
+  var intimacyProfile = profileJsonObject_(row.intimacy_profile_json, {});
   var boundaries = parseJson_(row.boundaries_json, []);
   if (!Array.isArray(boundaries) || !boundaries.length) {
     boundaries = Array.isArray(profile.boundaries) ? profile.boundaries : [];
@@ -1207,21 +1379,28 @@ function relationshipToOverlay_(row, profile) {
     };
   });
   var visibleAxes = allAxes.filter(function (axis) { return axis.value !== null; });
+  var qualitativeStats = relationshipQualitativeStats_(row, profile, intimacyProfile);
   var role = echoRelationshipRoleLabel_(row, profile);
-  var summary = echoRelationshipSummary_(role, profile, consentState, allAxes);
-  var displayRole = echoRelationshipCompactRole_(role, profile, allAxes);
+  var summary = echoRelationshipSummary_(role, profile, consentState, allAxes, qualitativeStats);
+  var displayRole = echoRelationshipCompactRole_(role, profile, allAxes, qualitativeStats);
+  var profileLoaded = profileHasDisplayData_(profile) || qualitativeStats.length > 0;
 
   return {
-    id: row.state_id || row.entity_b || profile.entityId || 'UNKNOWN_RELATIONSHIP',
+    id: row.state_id || profile.entityId || row.entity_b || 'UNKNOWN_RELATIONSHIP',
     name: row.display_name || profile.displayName || row.entity_b || 'Unbekannte Bindung',
     role: displayRole,
     baseRole: role,
-    note: [row.notes || profile.notes, summary].filter(function (value) { return !!value; }).join(' · '),
+    note: [relationshipNote_(row, profile), summary].filter(function (value) {
+      return !!value;
+    }).join(' · '),
     summary: summary,
     axes: visibleAxes,
     stats: {
       displayMode: 'compact',
       exactNumbersHidden: true,
+      profileLoaded: profileLoaded,
+      numericState: visibleAxes.length ? 'partially_established' : 'not_established',
+      numericStateLabel: visibleAxes.length ? 'teilweise erspielt' : 'noch nicht erspielt',
       axes: allAxes.map(function (axis) {
         return {
           key: axis.key,
@@ -1230,6 +1409,7 @@ function relationshipToOverlay_(row, profile) {
           established: axis.value !== null
         };
       }),
+      qualitative: qualitativeStats,
       powerStatus: profile.dominanceStyles && profile.dominanceStyles.length
         ? 'dominant'
         : 'noch nicht festgelegt',
@@ -1258,13 +1438,17 @@ function relationshipToOverlay_(row, profile) {
       dominance: axisOrProfile(row.dominance, 'dominance'),
       submission: axisOrProfile(row.submission, 'submission'),
       dominanceStyles: profile.dominanceStyles || [],
+      intimacyStyles: profile.intimacyStyles || [],
       initiationStyle: profile.initiationStyle || '',
       aftercareStyle: profile.aftercareStyle || '',
       boundaries: boundaries,
-      phase: row.intimacy_phase || intimacyProfile.phase || ''
+      phase: row.intimacy_phase || intimacyProfile.phase || '',
+      qualitative: qualitativeStats,
+      profileLoaded: profileLoaded
     }
   };
 }
+
 
 function relationshipConsentState_(row, intimacyProfile) {
   var raw = row.consent_state || row.consent_profile || intimacyProfile.consent_state || 'UNKNOWN';
@@ -1512,6 +1696,7 @@ function echoGetRuntimeContext() {
     commit_ready: !lastTurn || lastTurn.validation_status === 'COMMITTED',
     last_turn: lastTurn,
     snapshot: compact,
+    chat_delivery: echoChatDeliveryPolicy_(),
     preferences: getEchoPreferenceContext_({ includeAudit: true })
   };
 }
@@ -1539,7 +1724,8 @@ function echoSubmitTurn(turn) {
         accepted: true,
         duplicate: true,
         row: existingRow,
-        turn: existing
+        turn: existing,
+        chat_delivery: echoChatDeliveryPolicy_()
       };
     }
 
@@ -1556,7 +1742,8 @@ function echoSubmitTurn(turn) {
         accepted: false,
         duplicate: false,
         error: code,
-        last_turn: latest
+        last_turn: latest,
+        chat_delivery: echoChatDeliveryPolicy_()
       };
     }
 
@@ -1600,7 +1787,8 @@ function echoSubmitTurn(turn) {
       accepted: true,
       duplicate: false,
       row: targetRow,
-      turn: written
+      turn: written,
+      chat_delivery: echoChatDeliveryPolicy_()
     };
   } finally {
     lock.releaseLock();
@@ -1628,8 +1816,17 @@ function echoHandleGatewayRequest(request) {
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
+    case 'delivery-policy': return echoGetChatDeliveryPolicy();
     default: throw new Error('Unsupported gateway operation.');
   }
+}
+
+
+function echoGetChatDeliveryPolicy() {
+  return {
+    ok: true,
+    policy: echoChatDeliveryPolicy_()
+  };
 }
 
 function echoFastSpreadsheet_() {
@@ -2134,11 +2331,13 @@ function characterProfilesByEntity_(profiles) {
   return byEntity;
 }
 
+
 function characterProfileToOverlay_(profile) {
   var axes = profile.relationshipAxes || {};
   var knownAxes = Object.keys(axes).filter(function (key) {
     return axisValue_(axes[key]) !== null;
   });
+  var qualitativeStats = relationshipQualitativeStats_({}, profile, {});
 
   return {
     id: profile.entityId,
@@ -2151,7 +2350,8 @@ function characterProfileToOverlay_(profile) {
     },
     power: {
       dominanceStyles: profile.dominanceStyles,
-      initiationStyle: profile.initiationStyle
+      initiationStyle: profile.initiationStyle,
+      aftercareStyle: profile.aftercareStyle
     },
     magic: {
       primary: profile.magicResonance.primary || '',
@@ -2160,10 +2360,15 @@ function characterProfileToOverlay_(profile) {
     },
     stats: {
       visibility: 'compact',
-      knownAxes: knownAxes
+      profileLoaded: profileHasDisplayData_(profile) || qualitativeStats.length > 0,
+      numericState: knownAxes.length ? 'partially_established' : 'not_established',
+      numericStateLabel: knownAxes.length ? 'teilweise erspielt' : 'noch nicht erspielt',
+      knownAxes: knownAxes,
+      qualitative: qualitativeStats
     }
   };
 }
+
 
 function getEchoPreferenceContext_(options) {
   options = options || {};
@@ -2519,20 +2724,19 @@ function echoRelationshipStyleLabels_(styles) {
   });
 }
 
-function echoRelationshipCompactRole_(role, profile, axes) {
+
+function echoRelationshipCompactRole_(role, profile, axes, qualitativeStats) {
   var parts = [role];
   if (profile.dominanceStyles && profile.dominanceStyles.length) {
     parts.push('dominant');
   }
-  parts.push(
-    'Stats: ' + (
-      axes.some(function (axis) { return axis.value !== null; })
-        ? 'teilweise erspielt'
-        : 'noch nicht erspielt'
-    )
-  );
+
+  var profileLoaded = profileHasDisplayData_(profile) ||
+    (qualitativeStats && qualitativeStats.length);
+  parts.push(profileLoaded ? 'Profil: hinterlegt' : 'Stats: noch nicht erspielt');
   return parts.join(' · ');
 }
+
 
 function echoRelationshipExpertiseLabel_(profile) {
   var primary = String(profile.primaryExpertise || '');
@@ -2542,42 +2746,87 @@ function echoRelationshipExpertiseLabel_(profile) {
   return primary;
 }
 
-function echoRelationshipSummary_(role, profile, consentState, axes) {
-  var axisSummary = axes.map(function (axis) {
-    return axis.label + ': ' + echoRelationshipAxisText_(axis.value);
-  }).join(' · ');
-  var styles = echoRelationshipStyleLabels_(profile.dominanceStyles);
-  var parts = ['Stats: ' + axisSummary];
 
+function echoRelationshipSummary_(role, profile, consentState, axes, qualitativeStats) {
+  var establishedAxes = axes.filter(function (axis) { return axis.value !== null; });
+  var parts = [];
+
+  if (establishedAxes.length) {
+    parts.push('Stats: ' + establishedAxes.map(function (axis) {
+      return axis.label + ': ' + echoRelationshipAxisText_(axis.value);
+    }).join(' · '));
+  } else {
+    parts.push('Stats: Beziehungswerte noch nicht erspielt');
+  }
+
+  var highlights = (qualitativeStats || []).filter(function (stat) {
+    return ['trust', 'desire', 'tension', 'intimacy', 'phase', 'teaching', 'summary'].indexOf(stat.key) !== -1;
+  }).slice(0, 4);
+  if (highlights.length) {
+    parts.push('Profil: ' + highlights.map(function (stat) {
+      return stat.label + ': ' + stat.valueText;
+    }).join(' · '));
+  }
+
+  var styles = echoRelationshipStyleLabels_(profile.dominanceStyles);
   if (styles.length) parts.push('Macht: ' + styles.join(', '));
+
   var expertise = echoRelationshipExpertiseLabel_(profile);
   if (expertise) parts.push('ECHO: ' + expertise);
+
   parts.push('Einwilligung: ' + consentLabel_(consentState));
   return parts.join(' · ');
+}
+
+
+
+function isTechnicalRelationshipPlaceholder_(row) {
+  row = row || {};
+  var candidates = [row.entity_b, row.state_id, row.display_name, row.role].map(function (value) {
+    return String(value || '').trim().toUpperCase().replace(/[ -]+/g, '_');
+  });
+  var placeholders = [
+    'WISE_GUIDE',
+    'WISEGUIDE',
+    'SYSTEM_GUIDE',
+    'RELATIONSHIP_TEMPLATE',
+    'GENERIC_GUIDE'
+  ];
+
+  return candidates.some(function (candidate) {
+    return placeholders.indexOf(candidate) !== -1;
+  });
 }
 
 function echoRelationshipOverlays_(rows, profiles) {
   var profileByEntity = characterProfilesByEntity_(profiles || []);
   var linkedProfiles = {};
-  var result = (rows || []).map(function (row) {
+  var result = [];
+
+  (rows || []).forEach(function (row) {
+    if (isTechnicalRelationshipPlaceholder_(row)) return;
+
     var profile = profileByEntity[row.entity_b] || null;
     if (profile) linkedProfiles[profile.entityId] = true;
-    return relationshipToOverlay_(row, profile);
+    result.push(relationshipToOverlay_(row, profile));
   });
 
   // A newly introduced woman is visible immediately, even if the separate
   // numeric RELATIONSHIP_STATE row is created by a later event.
   (profiles || []).forEach(function (profile) {
+    if (isTechnicalRelationshipPlaceholder_({ entity_b: profile.entityId })) return;
     if (linkedProfiles[profile.entityId]) return;
+
     result.push(relationshipToOverlay_({
       entity_b: profile.entityId,
       consent_state: 'UNKNOWN',
       consent_profile: 'separate_profile_required',
       boundaries_json: JSON.stringify(profile.boundaries || []),
       intimacy_profile_json: '{}',
-      notes: 'Profil angelegt; numerischer Beziehungszustand wird im Spiel aufgebaut.'
+      notes: 'Profil hinterlegt; numerische Beziehungswerte werden erst durch ausgespielte Ereignisse festgelegt.'
     }, profile));
   });
 
   return result;
 }
+
