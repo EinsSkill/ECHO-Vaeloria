@@ -516,6 +516,118 @@ function jsonOutput_(object) {
 
 // ECHO turn processing and persistence commit layer.
 
+/**
+ * A correction updates the presentation of an existing scene. It must not create
+ * a second timeline event or apply relationship/state deltas a second time.
+ */
+function isSceneCorrection_(event) {
+  return event &&
+    String(event.event_type || '').toUpperCase() === 'SYSTEM_CORRECTION' &&
+    String(event.correction_for_turn_id || '').trim() !== '';
+}
+
+function isSceneCorrectionRow_(row) {
+  if (!row || !row.parsed_intent_json) return false;
+  try {
+    return isSceneCorrection_(parseJsonValue_(row.parsed_intent_json));
+  } catch (error) {
+    return false;
+  }
+}
+
+function validateSceneCorrection_(event) {
+  if (!isSceneCorrection_(event)) {
+    throw new Error('Invalid scene correction');
+  }
+
+  requireNonEmptyString_(event.event_id, 'event_id');
+  requireNonEmptyString_(event.player_action, 'player_action');
+  requireNonEmptyString_(event.narrative_summary, 'narrative_summary');
+
+  if (!event.scene || typeof event.scene !== 'object' || Array.isArray(event.scene)) {
+    throw new Error('scene is required');
+  }
+
+  ['feed_id', 'scene_type', 'title', 'location_id', 'narrative_text', 'mood', 'status']
+    .forEach(function (key) {
+      requireNonEmptyString_(event.scene[key], 'scene.' + key);
+    });
+
+  if (event.scene.available_actions_json !== undefined &&
+      !Array.isArray(event.scene.available_actions_json)) {
+    throw new Error('scene.available_actions_json must be an array');
+  }
+}
+
+function commitSceneCorrection_(event) {
+  validateSceneCorrection_(event);
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var turnInboxSheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
+    var originalTurn = findRow_(
+      turnInboxSheet,
+      'turn_id',
+      event.correction_for_turn_id
+    );
+    if (!originalTurn) {
+      throw new Error(
+        'Correction target turn not found: ' + event.correction_for_turn_id
+      );
+    }
+
+    var originalEventId = String(originalTurn.commit_event_id || '').trim();
+    var sceneFeedSheet = getSheet_(ECHO_CONFIG.sheets.sceneFeed);
+    var targetScene = originalTurn.ui_feed_id
+      ? findRow_(sceneFeedSheet, 'feed_id', originalTurn.ui_feed_id)
+      : null;
+    if (!targetScene && originalEventId) {
+      targetScene = findRow_(sceneFeedSheet, 'event_id', originalEventId);
+    }
+    if (!targetScene || !targetScene.__rowNumber) {
+      throw new Error(
+        'Correction target scene not found for turn: ' + event.correction_for_turn_id
+      );
+    }
+    if (originalEventId && String(targetScene.event_id || '') !== originalEventId) {
+      throw new Error('Correction target event mismatch');
+    }
+    if (!hasHeader_(sceneFeedSheet, 'narrative_text')) {
+      throw new Error('Missing scene column: narrative_text');
+    }
+
+    [
+      'scene_type',
+      'title',
+      'location_id',
+      'narrative_text',
+      'mood',
+      'visible_changes_json',
+      'available_actions_json',
+      'portraits_json',
+      'map_delta_json',
+      'relationship_delta_json',
+      'status',
+      'content_rating',
+      'intimacy_mode'
+    ].forEach(function (key) {
+      if (event.scene[key] !== undefined && event.scene[key] !== null) {
+        setCellByHeader_(sceneFeedSheet, targetScene.__rowNumber, key, event.scene[key]);
+      }
+    });
+
+    return {
+      ok: true,
+      correction: true,
+      event_id: String(targetScene.event_id || originalEventId),
+      ui_feed_id: String(targetScene.feed_id || originalTurn.ui_feed_id || '')
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function processTurnInbox_() {
   var sheet = getSheet_(ECHO_CONFIG.sheets.turnInbox);
   var table = readTable_(sheet);
@@ -524,7 +636,10 @@ function processTurnInbox_() {
   var processed = 0;
   table.rows.forEach(function(row) {
     var status = String(row.validation_status || '').toUpperCase();
-    if (['PENDING', 'READY'].indexOf(status) === -1) return;
+    var retryableCorrection = status === 'ERROR' &&
+      !String(row.processed_at || '').trim() &&
+      isSceneCorrectionRow_(row);
+    if (['PENDING', 'READY'].indexOf(status) === -1 && !retryableCorrection) return;
 
     try {
       if (!row.raw_input || !row.parsed_intent_json) {
@@ -538,9 +653,14 @@ function processTurnInbox_() {
       event.chat_id = event.chat_id || row.chat_id;
       event.raw_input = event.raw_input || row.raw_input;
       event.event_id = event.event_id || ('EVT-' + String(row.turn_id || Utilities.getUuid()).replace(/[^A-Za-z0-9_-]/g, ''));
-      validateEventShape_(event);
 
-      var result = commitTurn_(event, { skipInboxAppend: true });
+      var result;
+      if (isSceneCorrection_(event)) {
+        result = commitSceneCorrection_(event);
+      } else {
+        validateEventShape_(event);
+        result = commitTurn_(event, { skipInboxAppend: true });
+      }
       updateTurnInboxRow_(row.__rowNumber, {
         validation_status: 'COMMITTED',
         commit_event_id: result.event_id,
