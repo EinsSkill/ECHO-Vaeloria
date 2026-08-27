@@ -57,7 +57,7 @@ assert(!correction.includes('setCellByHeader_'), 'correction must not mutate the
 
 assert(!code.includes('function fullThreeTruthsSceneText_'), 'old hard-coded scene helper must stay removed');
 const declaredInternalFunctions = new Set(
-  [...code.matchAll(/^function\\s+([A-Za-z0-9_]+)\\s*\\(/gm)].map((match) => match[1])
+  [...code.matchAll(/^function\s+([A-Za-z0-9_]+)\s*\(/gm)].map((match) => match[1])
 );
 const calledInternalFunctions = new Set(
   [...code.matchAll(/\\b([A-Za-z_$][A-Za-z0-9_$]*_)\\s*\\(/g)].map((match) => match[1])
