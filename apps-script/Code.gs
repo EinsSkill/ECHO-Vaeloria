@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-6-scene-readback-2026-08-27';
+var ECHO_BUILD_ID = 'phase-7-event-reconciliation-2026-08-27';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -39,6 +39,8 @@ var ECHO_OVERLAY_CONTRACT_VERSION = '1.0.0';
 var ECHO_PROJECTION_CONTRACT_VERSION = '1.0.0';
 var ECHO_CONTEXT_BINDING_VERSION = '1.0.0';
 var ECHO_SCENE_READBACK_CONTRACT_VERSION = '1.0.0';
+var ECHO_EVENT_IDENTITY_VERSION = '1.0.0';
+var ECHO_COMMIT_RECONCILIATION_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -168,6 +170,9 @@ function doGet(e) {
   }
   if (action === 'scene-readback-contract') {
     return jsonOutput_(echoGetSceneReadbackContract());
+  }
+  if (action === 'commit-reconciliation-contract') {
+    return jsonOutput_(echoGetCommitReconciliationContract());
   }
   if (action === 'preferences') {
     return jsonOutput_(getEchoPreferenceContext_({ includeAudit: true }));
@@ -1452,6 +1457,30 @@ function echoGetSceneReadbackContract() {
   };
 }
 
+function echoCommitReconciliationContract_() {
+  return {
+    version: ECHO_COMMIT_RECONCILIATION_VERSION,
+    identity_version: ECHO_EVENT_IDENTITY_VERSION,
+    artifacts: ['EVENT_LOG', 'SCENE_FEED', 'SCENE_REVISIONS', 'STATE_SNAPSHOT'],
+    modes: ['NORMAL_COMMIT', 'SCENE_CORRECTION'],
+    verification: [
+      'event_id remains bound to one payload fingerprint',
+      'EVENT_LOG, SCENE_FEED and SCENE_REVISIONS reference the same transaction and revision',
+      'normal commits advance STATE_SNAPSHOT.save.last_event_id',
+      'corrections preserve the original scene event and reference the correction revision'
+    ],
+    failure_status: 'COMMIT_RECONCILIATION_FAILED',
+    commit_rule: 'A transaction is not reported as committed until all required artifacts agree.'
+  };
+}
+
+function echoGetCommitReconciliationContract() {
+  return {
+    ok: true,
+    contract: echoCommitReconciliationContract_()
+  };
+}
+
 function echoSceneContract_() {
   return {
     version: ECHO_SCENE_CONTRACT_VERSION,
@@ -1473,7 +1502,8 @@ function echoGetSceneContract() {
     resolution_contract: echoResolutionContract_(),
     overlay_contract: echoOverlayContract_(),
     projection_contract: echoProjectionContract_(),
-    scene_readback_contract: echoSceneReadbackContract_()
+    scene_readback_contract: echoSceneReadbackContract_(),
+    commit_reconciliation_contract: echoCommitReconciliationContract_()
   };
 }
 
@@ -2387,6 +2417,207 @@ function echoPhase5ContextBinding_(suppliedFingerprint, currentFingerprint) {
   };
 }
 
+
+function echoPhase7EventForFingerprint_(event) {
+  var source = event && typeof event === 'object' ? event : {};
+  var clone;
+  try {
+    clone = JSON.parse(JSON.stringify(source));
+  } catch (error) {
+    clone = Object.assign({}, source);
+  }
+  delete clone.context_fingerprint;
+  delete clone.context_read_at;
+  return clone;
+}
+
+function echoPhase7PayloadFingerprint_(event) {
+  return echoPhase2Fingerprint_(echoPhase7EventForFingerprint_(event));
+}
+
+function echoPhase7PayloadFingerprintCandidates_(event) {
+  var candidates = [
+    echoPhase7PayloadFingerprint_(event),
+    echoPhase2Fingerprint_(event)
+  ];
+  return candidates.filter(function (candidate, index) {
+    return candidate && candidates.indexOf(candidate) === index;
+  });
+}
+
+function echoPhase7PayloadMatches_(event, transaction) {
+  if (!transaction) return false;
+  var plan = parseJson_(transaction.plan_json, {});
+  var storedFingerprint = String(
+    transaction.payload_fingerprint ||
+    plan.payloadFingerprint ||
+    ''
+  ).trim();
+  if (!storedFingerprint) return false;
+  return echoPhase7PayloadFingerprintCandidates_(event).indexOf(storedFingerprint) !== -1;
+}
+
+function echoPhase7AssertEventIdentity_(event, transaction) {
+  var payloadFingerprint = echoPhase7PayloadFingerprint_(event);
+  if (!transaction) {
+    return {
+      version: ECHO_EVENT_IDENTITY_VERSION,
+      status: 'NEW',
+      accepted: true,
+      payloadFingerprint: payloadFingerprint
+    };
+  }
+
+  if (!echoPhase7PayloadMatches_(event, transaction)) {
+    throw new Error(
+      'EVENT_PAYLOAD_CONFLICT: event_id is already bound to a different payload.'
+    );
+  }
+
+  return {
+    version: ECHO_EVENT_IDENTITY_VERSION,
+    status: 'MATCHED',
+    accepted: true,
+    payloadFingerprint: payloadFingerprint,
+    storedFingerprint: String(
+      transaction.payload_fingerprint ||
+      parseJson_(transaction.plan_json, {}).payloadFingerprint ||
+      ''
+    ).trim()
+  };
+}
+
+function echoPhase7ReconcileCommit_(event, transaction, sceneResult, options) {
+  event = event || {};
+  transaction = transaction || {};
+  options = options || {};
+  var correction = !!options.correction;
+  var errors = [];
+  var transactionId = String(transaction.transaction_id || '').trim();
+  var feedId = String(sceneResult && (sceneResult.feed_id || sceneResult.ui_feed_id) || '').trim();
+  var revisionId = String(sceneResult && sceneResult.revision_id || '').trim();
+  var expectedSceneEventId = String(
+    correction ? (options.sceneEventId || '') : (event.event_id || '')
+  ).trim();
+
+  if (!transactionId) errors.push('transaction_id missing');
+  if (!feedId) errors.push('feed_id missing');
+  if (!revisionId) errors.push('revision_id missing');
+
+  var sceneRow = feedId
+    ? findRow_(getSheet_(ECHO_CONFIG.sheets.sceneFeed), 'feed_id', feedId)
+    : null;
+  if (!sceneRow) {
+    errors.push('SCENE_FEED row missing');
+  } else {
+    if (String(sceneRow.transaction_id || '').trim() !== transactionId) {
+      errors.push('SCENE_FEED transaction_id mismatch');
+    }
+    if (expectedSceneEventId &&
+        String(sceneRow.event_id || '').trim() !== expectedSceneEventId) {
+      errors.push('SCENE_FEED event_id mismatch');
+    }
+    if (revisionId &&
+        String(sceneRow.revision_id || '').trim() !== revisionId) {
+      errors.push('SCENE_FEED revision_id mismatch');
+    }
+  }
+
+  var revisionRow = revisionId
+    ? findRow_(getSheet_(ECHO_CONFIG.sheets.sceneRevisions), 'revision_id', revisionId)
+    : null;
+  if (!revisionRow) {
+    errors.push('SCENE_REVISIONS row missing');
+  } else {
+    if (String(revisionRow.feed_id || '').trim() !== feedId) {
+      errors.push('SCENE_REVISIONS feed_id mismatch');
+    }
+    if (String(revisionRow.transaction_id || '').trim() !== transactionId) {
+      errors.push('SCENE_REVISIONS transaction_id mismatch');
+    }
+    if (correction) {
+      if (String(revisionRow.event_id || '').trim() !== String(event.event_id || '').trim()) {
+        errors.push('SCENE_REVISIONS correction event_id mismatch');
+      }
+      if (expectedSceneEventId &&
+          String(revisionRow.source_event_id || '').trim() !== expectedSceneEventId) {
+        errors.push('SCENE_REVISIONS source_event_id mismatch');
+      }
+    } else {
+      if (String(revisionRow.event_id || '').trim() !== String(event.event_id || '').trim()) {
+        errors.push('SCENE_REVISIONS event_id mismatch');
+      }
+      if (String(revisionRow.source_event_id || '').trim() !== String(event.event_id || '').trim()) {
+        errors.push('SCENE_REVISIONS source_event_id mismatch');
+      }
+    }
+  }
+
+  if (!correction) {
+    var eventRow = findRow_(
+      getSheet_(ECHO_CONFIG.sheets.eventLog),
+      'event_id',
+      event.event_id
+    );
+    if (!eventRow) {
+      errors.push('EVENT_LOG row missing');
+    } else {
+      if (String(eventRow.transaction_id || '').trim() !== transactionId) {
+        errors.push('EVENT_LOG transaction_id mismatch');
+      }
+      if (revisionId &&
+          String(eventRow.revision_id || '').trim() !== revisionId) {
+        errors.push('EVENT_LOG revision_id mismatch');
+      }
+      var eventFingerprint = String(eventRow.payload_fingerprint || '').trim();
+      if (!eventFingerprint ||
+          echoPhase7PayloadFingerprintCandidates_(event).indexOf(eventFingerprint) === -1) {
+        errors.push('EVENT_LOG payload_fingerprint mismatch');
+      }
+    }
+
+    try {
+      var state = getStateMap_();
+      if (String(stateValue_(state, 'save.last_event_id') || '').trim() !==
+          String(event.event_id || '').trim()) {
+        errors.push('STATE_SNAPSHOT.save.last_event_id mismatch');
+      }
+    } catch (error) {
+      errors.push(
+        'STATE_SNAPSHOT unavailable: ' +
+        String(error && error.message ? error.message : error)
+      );
+    }
+  }
+
+  return {
+    version: ECHO_COMMIT_RECONCILIATION_VERSION,
+    ok: errors.length === 0,
+    status: errors.length ? 'COMMIT_RECONCILIATION_FAILED' : 'VERIFIED',
+    mode: correction ? 'SCENE_CORRECTION' : 'NORMAL_COMMIT',
+    errors: errors,
+    transactionId: transactionId || null,
+    feedId: feedId || null,
+    revisionId: revisionId || null,
+    artifactCount: correction ? 3 : 4
+  };
+}
+
+function echoPhase7AssertCommitReconciled_(event, transaction, sceneResult, options) {
+  var reconciliation = echoPhase7ReconcileCommit_(
+    event,
+    transaction,
+    sceneResult,
+    options
+  );
+  if (!reconciliation.ok) {
+    throw new Error(
+      'COMMIT_RECONCILIATION_FAILED: ' + reconciliation.errors.join('; ')
+    );
+  }
+  return reconciliation;
+}
+
 function echoPhase5RecoveryMayContinue_(event, transaction) {
   if (!transaction) return false;
 
@@ -2401,7 +2632,7 @@ function echoPhase5RecoveryMayContinue_(event, transaction) {
   ).trim();
   if (!storedFingerprint) return false;
 
-  return storedFingerprint === echoPhase2Fingerprint_(event);
+  return echoPhase7PayloadMatches_(event, transaction);
 }
 
 function echoPhase5AssertContextBinding_(event, options, currentContext) {
@@ -3217,6 +3448,7 @@ function echoGetRuntimeContext() {
     projection_contract: echoProjectionContract_(),
     context_binding_contract: echoContextBindingContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
+    commit_reconciliation_contract: echoCommitReconciliationContract_(),
     projections: authoritative.projections,
     preferences: authoritative.preferences
   };
@@ -3389,6 +3621,8 @@ function echoHandleGatewayRequest(request) {
       return echoGetContextBindingContract();
     case 'scene-readback-contract':
       return echoGetSceneReadbackContract();
+    case 'commit-reconciliation-contract':
+      return echoGetCommitReconciliationContract();
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
@@ -5015,6 +5249,7 @@ function getEchoAuthoritativeContext_(options) {
     },
     projection_contract: echoProjectionContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
+    commit_reconciliation_contract: echoCommitReconciliationContract_(),
     projections: projections
   };
   context.fingerprint = echoPhase2Fingerprint_(context);
@@ -5089,7 +5324,7 @@ function echoPhase2PlanForEvent_(event, options) {
     revisionId: revisionId,
     revisionNumber: revisionNumber,
     supersedesFeedId: previous ? String(previous.feed_id || '') : '',
-    payloadFingerprint: echoPhase2Fingerprint_(event)
+    payloadFingerprint: echoPhase7PayloadFingerprint_(event)
   };
 }
 
@@ -5123,7 +5358,7 @@ function echoPhase2StartTransaction_(event, options) {
       created_at: now,
       updated_at: now,
       attempt: 1,
-      payload_fingerprint: plan.payloadFingerprint || echoPhase2Fingerprint_(event),
+      payload_fingerprint: plan.payloadFingerprint || echoPhase7PayloadFingerprint_(event),
       plan_json: jsonString_(plan),
       error_code: '',
       recovery_action: '',
@@ -5322,7 +5557,7 @@ function echoPhase2AppendSceneRevision_(event, options) {
       reason: options.reason || 'NEW_SCENE',
       created_at: now,
       transaction_id: options.transactionId || '',
-      payload_fingerprint: options.payloadFingerprint || echoPhase2Fingerprint_(event)
+      payload_fingerprint: options.payloadFingerprint || echoPhase7PayloadFingerprint_(event)
     });
   }
 
@@ -5693,6 +5928,7 @@ function echoPhase2CommitPlan_(event, options) {
 
   var context = getEchoAuthoritativeContext_({ includePrivate: false });
   var existingTransaction = echoPhase2TransactionForEvent_(event.event_id);
+  var eventIdentity = echoPhase7AssertEventIdentity_(event, existingTransaction);
   var bindingOptions = Object.assign({}, options, {
     existingTransaction: existingTransaction
   });
@@ -5810,6 +6046,12 @@ function echoPhase2CommitPlan_(event, options) {
       eventId: event.event_id,
       revisionId: sceneResult.revision_id || transaction.revision_id || ''
     });
+    var commitReconciliation = echoPhase7AssertCommitReconciled_(
+      event,
+      transaction,
+      sceneResult,
+      { correction: false }
+    );
     echoPhase2TransactionUpdate_(transaction.transaction_id, {
       status: 'COMMITTED',
       committed_at: new Date(),
@@ -5825,7 +6067,8 @@ function echoPhase2CommitPlan_(event, options) {
       event_id: event.event_id,
       ui_feed_id: sceneResult ? sceneResult.feed_id : (transaction.ui_feed_id || ''),
       revision_id: sceneResult ? sceneResult.revision_id : (transaction.revision_id || ''),
-      readback: sceneReadback
+      readback: sceneReadback,
+      reconciliation: commitReconciliation
     };
   } catch (error) {
     echoPhase2TransactionUpdate_(transaction.transaction_id, {
@@ -5847,6 +6090,7 @@ function commitSceneCorrectionCore_(event, options) {
   validateSceneCorrection_(event);
   echoPhase2EnsureSchema_();
   var existingCorrectionTransaction = echoPhase2TransactionForEvent_(event.event_id);
+  var correctionIdentity = echoPhase7AssertEventIdentity_(event, existingCorrectionTransaction);
   var correctionBindingOptions = Object.assign({}, options, {
     existingTransaction: existingCorrectionTransaction
   });
@@ -5932,6 +6176,15 @@ function commitSceneCorrectionCore_(event, options) {
       eventId: originalEventId,
       revisionId: result.revision_id
     });
+    var correctionReconciliation = echoPhase7AssertCommitReconciled_(
+      event,
+      transaction,
+      result,
+      {
+        correction: true,
+        sceneEventId: originalEventId
+      }
+    );
     echoPhase2TransactionUpdate_(transaction.transaction_id, {
       status: 'COMMITTED',
       committed_at: new Date(),
@@ -5948,7 +6201,8 @@ function commitSceneCorrectionCore_(event, options) {
       event_id: originalEventId,
       ui_feed_id: result.feed_id,
       revision_id: result.revision_id,
-      readback: correctionReadback
+      readback: correctionReadback,
+      reconciliation: correctionReconciliation
     };
   } catch (error) {
     echoPhase2TransactionUpdate_(transaction.transaction_id, {
