@@ -1,0 +1,22 @@
+name: Phase 1 foundation
+
+on:
+  push:
+    branches: [main, phase-1-foundation]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check Apps Script syntax
+        run: node --check apps-script/Code.gs
+      - name: Run Phase 1 checks
+        run: node tests/phase-1-foundation.test.js
