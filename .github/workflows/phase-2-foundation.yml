@@ -1,8 +1,8 @@
-name: Phase 4 stable workbook projections
+name: Phase 5 context binding and stale-turn protection
 
 on:
   push:
-    branches: [main, phase-3c-overlay-delivery, phase-4-state-projections]
+    branches: [main, phase-3c-overlay-delivery, phase-4-state-projections, phase-5-context-binding]
   pull_request:
     branches: [main]
 
@@ -30,3 +30,5 @@ jobs:
         run: node tests/phase-3c-overlay-delivery.test.js
       - name: Run Phase 4 checks
         run: node tests/phase-4-state-projections.test.js
+      - name: Run Phase 5 checks
+        run: node tests/phase-5-context-binding.test.js
