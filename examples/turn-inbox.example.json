@@ -16,11 +16,22 @@
       "narrative_text": "Dies ist ausschließlich ein anonymisierter Beispieltext für den öffentlichen Datenvertrag.",
       "mood": "neutral",
       "available_actions_json": [],
-      "status": "PLAY"
+      "status": "PLAY",
+      "scene_blocks_json": [
+        {
+          "type": "prose",
+          "text": "Dies ist ausschließlich ein anonymisierter Beispieltext für den öffentlichen Datenvertrag."
+        }
+      ]
     },
     "state_updates": {},
     "relationship_updates": {},
-    "new_flags": []
+    "new_flags": [],
+    "resolution": {
+      "mode": "NO_CHECK",
+      "reason": "Die Untersuchung ist sicher genug, um ohne Probe zu erfolgen.",
+      "source": "ECHO_CHATGPT"
+    }
   },
   "validation_status": "PENDING"
 }
