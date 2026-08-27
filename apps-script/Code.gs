@@ -485,14 +485,27 @@ function requireApiKey_(provided) {
 }
 
 function getSheet_(name) {
-  var props = PropertiesService.getScriptProperties();
-  var spreadsheetId = String(props.getProperty(ECHO_CONFIG.spreadsheetIdProperty) || '').trim();
-  if (!spreadsheetId) {
-    throw new Error('ECHO_SPREADSHEET_ID is not configured in Script Properties');
-  }
-  var sheet = SpreadsheetApp.openById(spreadsheetId).getSheetByName(name);
+  var sheet = echoSpreadsheet_().getSheetByName(name);
   if (!sheet) throw new Error('Missing sheet: ' + name);
   return sheet;
+}
+
+/**
+ * Resolve the live spreadsheet for both standalone and bound Apps-Script projects.
+ * A configured Script Property remains authoritative; bound projects can use their
+ * container spreadsheet without an extra manual ID configuration step.
+ */
+function echoSpreadsheet_() {
+  var props = PropertiesService.getScriptProperties();
+  var spreadsheetId = String(props.getProperty(ECHO_CONFIG.spreadsheetIdProperty) || '').trim();
+  if (spreadsheetId) return SpreadsheetApp.openById(spreadsheetId);
+
+  var active = SpreadsheetApp.getActiveSpreadsheet();
+  if (active) return active;
+
+  throw new Error(
+    'No spreadsheet configured. Bind the script to the ECHO sheet or set ECHO_SPREADSHEET_ID.'
+  );
 }
 
 function jsonOutput_(object) {
@@ -1388,18 +1401,7 @@ function echoHandleGatewayRequest(request) {
 }
 
 function echoFastSpreadsheet_() {
-  const id = String(
-    PropertiesService.getScriptProperties().getProperty('ECHO_SPREADSHEET_ID') || ''
-  ).trim();
-
-  if (id) return SpreadsheetApp.openById(id);
-
-  const active = SpreadsheetApp.getActiveSpreadsheet();
-  if (active) return active;
-
-  throw new Error(
-    'No spreadsheet configured. Bind the script to the ECHO sheet or set ECHO_SPREADSHEET_ID.'
-  );
+  return echoSpreadsheet_();
 }
 
 function echoFastRequireSheet_(ss, name) {
