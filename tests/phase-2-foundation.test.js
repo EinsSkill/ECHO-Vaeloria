@@ -32,7 +32,8 @@ for (const required of [
   'migrateEchoPhase2',
   "source_of_truth: 'ECHO_WORKBOOK'",
   'read_before_every_turn: true',
-  'context_fingerprint'
+  'context_fingerprint',
+  "CARRIED: 'ACTIVE'"
 ]) {
   assert(code.includes(required), `missing Phase 2 contract: ${required}`);
 }
