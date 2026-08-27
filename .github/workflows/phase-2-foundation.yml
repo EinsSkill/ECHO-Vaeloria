@@ -1,8 +1,8 @@
-name: Phase 5 context binding and stale-turn protection
+name: Phase 6 scene readback and commit completeness
 
 on:
   push:
-    branches: [main, phase-3c-overlay-delivery, phase-4-state-projections, phase-5-context-binding]
+    branches: [main, phase-3c-overlay-delivery, phase-4-state-projections, phase-5-context-binding, phase-6-scene-readback]
   pull_request:
     branches: [main]
 
@@ -32,3 +32,5 @@ jobs:
         run: node tests/phase-4-state-projections.test.js
       - name: Run Phase 5 checks
         run: node tests/phase-5-context-binding.test.js
+      - name: Run Phase 6 checks
+        run: node tests/phase-6-scene-readback.test.js
