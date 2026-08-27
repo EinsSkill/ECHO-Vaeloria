@@ -110,7 +110,7 @@ const scene = helpers.overlaySceneDeliveryPayload_({
 
 assert.strictEqual(
   scene.formattedText,
-  'Eine Szene.\n\nMireth: „Bleib hier.“\n\nDie Lage hat sich verändert.'
+  'Eine Szene.\n\nMireth: „Bleib hier.“\n\nÄNDERUNGEN: Die Lage hat sich verändert.'
 );
 assert.strictEqual(scene.narrativeText, scene.formattedText);
 assert.strictEqual(scene.text, scene.formattedText);
