@@ -2039,30 +2039,36 @@ function validateEchoPreferenceStorage_() {
 
 function readCharacterProfiles_() {
   var rows = readTable_(getSheet_(ECHO_CONFIG.sheets.characterProfiles)).rows;
-  return rows
-    .filter(function (row) { return echoProfileStatusIsActive_(row.status); })
-    .map(function (row) {
-      return {
-        profileId: row.profile_id || '',
-        entityId: row.entity_id || '',
-        displayName: row.display_name || row.entity_id || 'Unbekannte Frau',
-        status: row.status || 'ACTIVE',
-        groupRole: row.group_role || '',
-        primaryExpertise: row.primary_expertise || '',
-        secondaryExpertise: row.secondary_expertise || '',
-        dominanceStyles: profileJsonArray_(row.dominance_styles_json, []),
-        intimacyStyles: profileJsonArray_(row.intimacy_styles_json, []),
-        initiationStyle: row.initiation_style || '',
-        aftercareStyle: row.aftercare_style || '',
-        boundaries: profileJsonArray_(row.boundaries_json, []),
-        relationshipAxes: profileJsonObject_(row.relationship_axes_json, {}),
-        magicResonance: profileJsonObject_(row.magic_resonance_json, {}),
-        groupPosition: profileJsonObject_(row.group_position_json, {}),
-        lastEventId: row.last_event_id || '',
-        updatedAt: row.updated_at || '',
-        notes: row.notes || ''
-      };
-    });
+  var newestByEntity = {};
+
+  rows.forEach(function (row) {
+    if (!echoProfileStatusIsActive_(row.status) || !row.entity_id) return;
+    newestByEntity[String(row.entity_id)] = row;
+  });
+
+  return Object.keys(newestByEntity).map(function (entityId) {
+    var row = newestByEntity[entityId];
+    return {
+      profileId: row.profile_id || '',
+      entityId: row.entity_id || '',
+      displayName: row.display_name || row.entity_id || 'Unbekannte Frau',
+      status: row.status || 'ACTIVE',
+      groupRole: row.group_role || '',
+      primaryExpertise: row.primary_expertise || '',
+      secondaryExpertise: row.secondary_expertise || '',
+      dominanceStyles: profileJsonArray_(row.dominance_styles_json, []),
+      intimacyStyles: profileJsonArray_(row.intimacy_styles_json, []),
+      initiationStyle: row.initiation_style || '',
+      aftercareStyle: row.aftercare_style || '',
+      boundaries: profileJsonArray_(row.boundaries_json, []),
+      relationshipAxes: profileJsonObject_(row.relationship_axes_json, {}),
+      magicResonance: profileJsonObject_(row.magic_resonance_json, {}),
+      groupPosition: profileJsonObject_(row.group_position_json, {}),
+      lastEventId: row.last_event_id || '',
+      updatedAt: row.updated_at || '',
+      notes: row.notes || ''
+    };
+  });
 }
 
 function characterProfilesByEntity_(profiles) {
@@ -2258,6 +2264,7 @@ function validatePreferenceUpdates_(updates) {
 }
 
 function validateCharacterProfileUpdates_(updates) {
+  ensurePreferenceSheets_();
   if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
     throw new Error('character_profile_updates must be an object.');
   }
@@ -2304,6 +2311,7 @@ function validateCharacterProfileUpdates_(updates) {
 
 function applyPreferenceUpdates_(updates, eventId, now) {
   if (!updates) return;
+  ensurePreferenceSheets_();
   validatePreferenceUpdates_(updates);
 
   var playerUpdates = {};
@@ -2377,6 +2385,7 @@ function mergeProfileJson_(currentRaw, incoming) {
 
 function applyCharacterProfileUpdates_(updates, eventId, now) {
   if (!updates) return;
+  ensurePreferenceSheets_();
   validateCharacterProfileUpdates_(updates);
 
   var sheet = getSheet_(ECHO_CONFIG.sheets.characterProfiles);
