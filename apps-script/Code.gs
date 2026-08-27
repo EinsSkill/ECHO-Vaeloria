@@ -29,10 +29,45 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-2-transactional-state-2026-08-27';
+var ECHO_BUILD_ID = 'phase-3-narrative-runtime-2026-08-27';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
+var ECHO_SCENE_CONTRACT_VERSION = '1.0.0';
+
+var ECHO_SCENE_BLOCK_TYPES_ = {
+  heading: true,
+  prose: true,
+  dialogue: true,
+  action: true,
+  sensory: true,
+  system: true,
+  change: true,
+  status: true,
+  prompt: true
+};
+
+var ECHO_SCENE_BLOCK_TYPE_ALIASES_ = {
+  narrative: 'prose',
+  narration: 'prose',
+  description: 'prose',
+  text: 'prose',
+  dialog: 'dialogue',
+  speech: 'dialogue',
+  npc_dialogue: 'dialogue',
+  stage_direction: 'action',
+  emote: 'action',
+  gesture: 'action',
+  sense: 'sensory',
+  system_message: 'system',
+  mechanic: 'system',
+  consequence: 'change',
+  update: 'change',
+  status_line: 'status',
+  next_action: 'prompt',
+  choice: 'prompt',
+  question: 'prompt'
+};
 
 var ECHO_STATE_ALIAS_TO_CANONICAL_ = {
   world_location_id: 'player.location_id',
@@ -104,6 +139,9 @@ function doGet(e) {
   }
   if (action === 'delivery-policy') {
     return jsonOutput_(echoGetChatDeliveryPolicy());
+  }
+  if (action === 'scene-contract') {
+    return jsonOutput_(echoGetSceneContract());
   }
   if (action === 'preferences') {
     return jsonOutput_(getEchoPreferenceContext_({ includeAudit: true }));
@@ -206,7 +244,7 @@ function processTurnInbox() {
 // ECHO turn contract and inbox boundary.
 // This module is public and secret-free. Live state remains in the private sheet.
 
-var ECHO_CONTRACT_VERSION = '3.0.0';
+var ECHO_CONTRACT_VERSION = '3.1.0';
 
 var ECHO_RELATIONSHIP_NUMERIC_FIELDS = {
   trust: true,
@@ -446,7 +484,7 @@ function setupEchoSchema() {
     'teaching'
   ]);
   ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode']);
-  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'scene_blocks_json']);
+  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'scene_blocks_json', 'scene_contract_version']);
   return {
     ok: true,
     phase2: phase2,
@@ -672,24 +710,106 @@ function sceneTextForOverlay_(scene) {
   );
 }
 
-function sceneBlocksFrom_(raw) {
+function sceneBlocksRaw_(raw, strict) {
   var value = raw;
-  if (typeof value === 'string') value = parseJson_(value, null);
-  if (!Array.isArray(value)) return [];
+  if (value === undefined || value === null || value === '') return [];
 
-  return value.map(function (block) {
-    if (typeof block === 'string') {
-      return { type: 'prose', text: block };
+  if (typeof value === 'string') {
+    if (!value.trim()) return [];
+    try {
+      value = JSON.parse(value);
+    } catch (error) {
+      if (strict) throw new Error('scene blocks must be valid JSON.');
+      return [];
     }
-    if (!block || typeof block !== 'object') return null;
+  }
+
+  if (!Array.isArray(value)) {
+    if (strict) throw new Error('scene blocks must be an array or JSON array.');
+    return [];
+  }
+  return value;
+}
+
+function sceneBlockType_(rawType, strict) {
+  var raw = String(rawType || 'prose').trim().toLowerCase();
+  var type = ECHO_SCENE_BLOCK_TYPE_ALIASES_[raw] || raw;
+  if (ECHO_SCENE_BLOCK_TYPES_[type]) return type;
+  if (strict) throw new Error('Unknown scene block type: ' + raw);
+  return 'prose';
+}
+
+function sceneBlockText_(block) {
+  if (typeof block === 'string') return block.replace(/\r\n/g, '\n').trim();
+  if (!block || typeof block !== 'object') return '';
+  return String(
+    block.text !== undefined
+      ? block.text
+      : (block.content !== undefined ? block.content : '')
+  ).replace(/\r\n/g, '\n').trim();
+}
+
+function normalizeSceneBlocks_(raw, options) {
+  options = options || {};
+  var strict = options.strict !== false;
+  return sceneBlocksRaw_(raw, strict).map(function (block, index) {
+    if (typeof block === 'string') {
+      var stringText = sceneBlockText_(block);
+      if (!stringText) {
+        if (strict) throw new Error('scene block ' + index + ' cannot be empty.');
+        return null;
+      }
+      return {
+        type: 'prose',
+        text: stringText,
+        speaker: '',
+        character_id: '',
+        tone: '',
+        emphasis: ''
+      };
+    }
+
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      if (strict) throw new Error('scene block ' + index + ' must be an object or string.');
+      return null;
+    }
+
+    var text = sceneBlockText_(block);
+    if (!text) {
+      if (strict) throw new Error('scene block ' + index + ' requires text or content.');
+      return null;
+    }
+
+    var type = sceneBlockType_(block.type || block.kind || 'prose', strict);
+    var visibility = String(block.visibility || 'VISIBLE').trim().toUpperCase();
+    if (['HIDDEN', 'INTERNAL', 'SECRET'].indexOf(visibility) !== -1) {
+      if (strict) throw new Error('scene block ' + index + ' cannot be hidden in SCENE_FEED.');
+      return null;
+    }
+
+    var speaker = block.speaker === undefined || block.speaker === null
+      ? ''
+      : String(block.speaker).trim();
+    var characterId = block.character_id || block.characterId || '';
+    if (characterId !== '' && typeof characterId !== 'string') {
+      characterId = String(characterId);
+    }
+
     return {
-      type: block.type || block.kind || 'prose',
-      speaker: block.speaker || '',
-      text: block.text || block.content || ''
+      type: type,
+      text: text,
+      speaker: speaker,
+      character_id: String(characterId || '').trim(),
+      tone: String(block.tone || '').trim(),
+      emphasis: String(block.emphasis || '').trim()
     };
   }).filter(function (block) {
-    return block && String(block.text || '').trim() !== '';
+    return !!block;
   });
+}
+
+function sceneBlocksFrom_(raw) {
+  return normalizeSceneBlocks_(raw, { strict: false });
 }
 
 function sceneTextFromBlocks_(raw, fallback) {
@@ -704,11 +824,16 @@ function sceneTextFromBlocks_(raw, fallback) {
   return blocks.map(function (block) {
     var text = String(block.text || '').trim();
     var type = String(block.type || 'prose').toLowerCase();
-    if (type === 'dialogue' && String(block.speaker || '').trim()) {
-      var dialogue = text.replace(/^„|“$/g, '').trim();
-      return String(block.speaker).trim() + ': „' + dialogue + '“';
+
+    if (type === 'dialogue') {
+      var dialogue = text.replace(/^[„"“]+|[“"”]+$/g, '').trim();
+      return block.speaker
+        ? String(block.speaker).trim() + ': „' + dialogue + '“'
+        : '„' + dialogue + '“';
     }
     if (type === 'system') return 'SYSTEM: ' + text;
+    if (type === 'change') return 'ÄNDERUNGEN: ' + text;
+    if (type === 'status') return 'STATUS: ' + text;
     return text;
   }).filter(function (text) {
     return !!text;
@@ -716,11 +841,29 @@ function sceneTextFromBlocks_(raw, fallback) {
 }
 
 function sceneBlocksForOverlay_(scene) {
-  return sceneBlocksFrom_(
-    scene && (scene.scene_blocks_json || scene.blocks_json || scene.blocks)
-  );
+  if (!scene) return [];
+  var raw = scene.scene_blocks_json || scene.blocks_json || scene.blocks;
+  var blocks = sceneBlocksFrom_(raw);
+  if (blocks.length) return blocks;
+
+  var fallback = String(scene.narrative_text || '').trim();
+  return fallback
+    ? [{ type: 'prose', text: fallback, speaker: '', character_id: '', tone: '', emphasis: '' }]
+    : [];
 }
 
+function sceneBlocksForStorage_(scene) {
+  scene = scene || {};
+  var raw = scene.scene_blocks_json !== undefined
+    ? scene.scene_blocks_json
+    : (scene.blocks_json !== undefined ? scene.blocks_json : scene.blocks);
+  var blocks = normalizeSceneBlocks_(raw, { strict: true });
+  if (!blocks.length && String(scene.narrative_text || '').trim()) {
+    blocks = normalizeSceneBlocks_([scene.narrative_text], { strict: true });
+  }
+  if (!blocks.length) throw new Error('scene requires at least one visible scene block.');
+  return blocks;
+}
 
 function validateSceneBlocks_(scene) {
   if (!scene) return;
@@ -728,27 +871,28 @@ function validateSceneBlocks_(scene) {
     ? scene.scene_blocks_json
     : (scene.blocks_json !== undefined ? scene.blocks_json : scene.blocks);
   if (raw === undefined || raw === null || raw === '') return;
+  normalizeSceneBlocks_(raw, { strict: true });
+}
 
-  var blocks = typeof raw === 'string' ? parseJson_(raw, null) : raw;
-  if (!Array.isArray(blocks)) {
-    throw new Error('scene blocks must be an array or JSON array.');
-  }
+function echoSceneContract_() {
+  return {
+    version: ECHO_SCENE_CONTRACT_VERSION,
+    storage_field: 'scene_blocks_json',
+    block_types: Object.keys(ECHO_SCENE_BLOCK_TYPES_),
+    aliases: ECHO_SCENE_BLOCK_TYPE_ALIASES_,
+    required_block_fields: ['type', 'text'],
+    optional_block_fields: ['speaker', 'character_id', 'tone', 'emphasis'],
+    order: ['heading', 'prose', 'dialogue', 'action', 'sensory', 'system', 'change', 'status', 'prompt'],
+    visibility_rule: 'Only visible blocks may be written to SCENE_FEED.',
+    legacy_rule: 'Missing blocks are normalized to one prose block from narrative_text.'
+  };
+}
 
-  blocks.forEach(function (block, index) {
-    if (typeof block === 'string') {
-      if (!block.trim()) throw new Error('scene block ' + index + ' cannot be empty.');
-      return;
-    }
-    if (!block || typeof block !== 'object' || Array.isArray(block)) {
-      throw new Error('scene block ' + index + ' must be an object or string.');
-    }
-    if (!String(block.text || block.content || '').trim()) {
-      throw new Error('scene block ' + index + ' requires text or content.');
-    }
-    if (block.speaker !== undefined && typeof block.speaker !== 'string') {
-      throw new Error('scene block ' + index + ' speaker must be text.');
-    }
-  });
+function echoGetSceneContract() {
+  return {
+    ok: true,
+    contract: echoSceneContract_()
+  };
 }
 
 function isSceneCorrection_(event) {
@@ -1205,7 +1349,8 @@ function getOverlayState_() {
     intimacyMode: scene.intimacy_mode || '',
     location: currentLocation,
     locationLabel: currentLocation,
-    locationId: locationId
+    locationId: locationId,
+    sceneContractVersion: scene.scene_contract_version || ECHO_SCENE_CONTRACT_VERSION
   };
 
   var conditionNames = conditions.map(conditionName_).filter(function (name) { return !!name; });
@@ -1275,7 +1420,8 @@ function getOverlayState_() {
     threads: threadRows.filter(isVisibleThread_).map(threadToOverlay_),
     mapRegions: mapRegions_(state, locationId),
     selectedMapRegion: mapRegionIdForLocation_(locationId),
-    chapters: chaptersFrom_(state)
+    chapters: chaptersFrom_(state),
+    sceneContract: echoSceneContract_()
   };
 }
 
@@ -1920,6 +2066,7 @@ function echoGetRuntimeContext() {
     chat_delivery: echoChatDeliveryPolicy_(),
     preference_policy: authoritative.preferences.effectivePolicy,
     preference_coverage: authoritative.preferences.preferenceCoverage,
+    scene_contract: echoSceneContract_(),
     preferences: authoritative.preferences
   };
 }
@@ -2039,6 +2186,8 @@ function echoHandleGatewayRequest(request) {
     case 'context':
     case 'canonical-context':
       return echoGetRuntimeContext();
+    case 'scene-contract':
+      return echoGetSceneContract();
     case 'preferences': return echoGetPreferenceContext();
     case 'submit': return echoSubmitTurn(body.turn);
     case 'status': return echoGetTurnStatus(body.turn_id);
@@ -3325,7 +3474,7 @@ var ECHO_PHASE2_SCHEMA_ = {
   ],
   SCENE_FEED: [
     'feed_id', 'run_id', 'sequence', 'event_id', 'scene_type', 'title',
-    'location_id', 'narrative_text', 'scene_blocks_json', 'mood',
+    'location_id', 'narrative_text', 'scene_blocks_json', 'scene_contract_version', 'mood',
     'visible_changes_json', 'available_actions_json', 'portraits_json',
     'map_delta_json', 'relationship_delta_json', 'status', 'content_rating',
     'intimacy_mode', 'scene_id', 'revision_id', 'revision_number',
@@ -3857,6 +4006,7 @@ function echoPhase2EffectiveSceneRows_(rows) {
 function echoPhase2AppendSceneRevision_(event, options) {
   options = options || {};
   var scene = event.scene || {};
+  var storageBlocks = sceneBlocksForStorage_(scene);
   var sceneFeed = getSheet_(ECHO_CONFIG.sheets.sceneFeed);
   var revisionSheet = getSheet_(ECHO_CONFIG.sheets.sceneRevisions);
   var sceneEventId = String(options.sceneEventId || event.event_id || '');
@@ -3909,8 +4059,11 @@ function echoPhase2AppendSceneRevision_(event, options) {
     scene_type: scene.scene_type || 'narrative',
     title: scene.title || 'Neue Szene',
     location_id: scene.location_id || stateValue_(getStateMap_(), 'player.location_id') || 'UNKNOWN_LOCATION',
-    narrative_text: options.narrativeText !== undefined ? options.narrativeText : (scene.narrative_text || event.narrative_summary || ''),
-    scene_blocks_json: jsonString_(scene.scene_blocks_json || scene.blocks_json || scene.blocks || []),
+    narrative_text: options.narrativeText !== undefined
+      ? options.narrativeText
+      : sceneTextFromBlocks_(storageBlocks, scene.narrative_text || event.narrative_summary || ''),
+    scene_blocks_json: jsonString_(storageBlocks),
+    scene_contract_version: ECHO_SCENE_CONTRACT_VERSION,
     mood: scene.mood || 'unbestimmt',
     visible_changes_json: jsonString_(scene.visible_changes_json || {}),
     available_actions_json: jsonString_(scene.available_actions_json || []),
