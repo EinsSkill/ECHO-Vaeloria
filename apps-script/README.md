@@ -26,6 +26,18 @@ ECHO_RUNTIME_KEYS_JSON = ["save.last_event_id", "world_location_id", ...]
 
 `ECHO_RUNTIME_KEYS_JSON` überschreibt die Standardauswahl des kompakten Runtime-Reads.
 
+## Verbindlicher Chat-/Overlay-Ausgabemodus
+
+Für das laufende Spiel gilt ein fester Ausgabevertrag:
+
+- Der Chat nimmt die Spielerhandlung entgegen und gibt keine vollständige Szene aus.
+- Die vollständige, formatierte Erzählung wird nach erfolgreichem Commit in SCENE_FEED geschrieben und ausschließlich vom Overlay dargestellt.
+- Erst nach Commit und Readback wird im Chat nur kurz bestätigt: „Übertragen.“
+- Bei Fehlern wird nur der Fehler knapp gemeldet; es wird keine nicht gespeicherte Szene als übertragen ausgegeben.
+- Die Spielleitung arbeitet mit gründlicher Persistenz-/Konsistenzprüfung; bei aufwendigeren Zügen ist ein internes Prüfungsfenster von etwa 2–3 Minuten vorgesehen.
+
+Der Runtime-Kontext liefert diese Policy unter chat_delivery, damit spätere Connectoren sie maschinenlesbar einhalten können.
+
 ## Live-Integration
 
 Das bestehende `doPost()` in `Code.gs` routet Gateway-Anfragen mit
