@@ -81,3 +81,14 @@ Phase 4 ergänzt stabile, workbook-basierte Projektionen für Welt, Charaktere, 
 - GET?action=projection-contract und die Gateway-Operation projection-contract liefern den technischen Vertrag.
 
 Phase 4 benötigt keine neue Migration und schreibt keine privaten Tabellenwerte in Git. Beim späteren Sammel-Import genügt weiterhin die konsolidierte apps-script/Code.gs.
+
+Phase 5 ergänzt die Kontextbindung für neue Spielzüge:
+
+- Der Runtime-Kontext liefert context_binding_contract und context_fingerprint.
+- Ein Connector kann den gelesenen context_fingerprint zusammen mit dem Zug in TURN_INBOX übergeben.
+- Vor dem Commit liest der Processor den autoritativen Workbook-Kontext erneut.
+- Bei übereinstimmender Signatur wird der Zug verarbeitet; ein abweichender Fingerprint wird als STALE abgelehnt, bevor EVENT_LOG, SCENE_FEED oder State geschrieben werden.
+- Ohne Fingerprint bleiben ältere direkte Clients kompatibel; sie verlieren aber den zusätzlichen Stale-Schutz.
+- Der Vertrag ist unter GET?action=context-binding-contract und als Gateway-Operation context-binding-contract verfügbar.
+
+Auch Phase 5 verändert keine privaten Tabellenwerte und benötigt keine zusätzliche Migration.
