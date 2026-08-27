@@ -1330,7 +1330,8 @@ function echoGetSceneContract() {
     ok: true,
     contract: echoSceneContract_(),
     resolution_contract: echoResolutionContract_(),
-    overlay_contract: echoOverlayContract_()
+    overlay_contract: echoOverlayContract_(),
+    projection_contract: echoProjectionContract_()
   };
 }
 
@@ -1854,13 +1855,25 @@ function echoPhase4PreferredDisplayName_(row, profile, entityId) {
   return rowLabel || String(entityId || '').trim();
 }
 
+function echoPhase4RoleLabel_(role) {
+  var value = String(role || '').trim();
+  var labels = {
+    first_echo_expert_and_dominant_guide: 'ECHO-Expertin · dominante Führerin',
+    echo_master: 'ECHO-Expertin',
+    dominant_guide: 'dominante Führerin'
+  };
+  return labels[value] || value.replace(/_/g, ' ');
+}
+
 function echoPhase4PreferredRole_(row, profile) {
   if (profile && String(profile.groupRole || '').trim()) {
-    return String(profile.groupRole).trim();
+    return echoPhase4RoleLabel_(profile.groupRole);
   }
 
   var rowRole = String(row && row.role || '').trim();
-  return echoPhase4HasTechnicalLabel_(rowRole, '') ? '' : rowRole;
+  return echoPhase4HasTechnicalLabel_(rowRole, '')
+    ? ''
+    : echoPhase4RoleLabel_(rowRole);
 }
 
 function echoPhase4GroupMembershipActive_(row) {
@@ -2181,19 +2194,19 @@ function getOverlayState_() {
   var threadRows = readOverlayRows_(ECHO_CONFIG.sheets.threads, overlayWarnings);
   var preferenceContext = getEchoPreferenceContext_({ includeAudit: false });
   var groupMembers = echoPhase2GroupMembersForContext_(overlayWarnings);
-  var projections = echoPhase4BuildProjections_(
-    state,
-    null,
-    relationshipRows,
-    groupMembers,
-    preferenceContext,
-    overlayWarnings
-  );
 
   var playableScenes = echoPhase2EffectiveSceneRows_(sceneRows.filter(isPlayableScene_));
   var scene = latestBySequence_(playableScenes) || {};
   var events = eventRows.filter(function (row) { return row.event_id; }).slice().sort(sequenceAscending_);
   var latestEvent = events.length ? events[events.length - 1] : null;
+  var projections = echoPhase4BuildProjections_(
+    state,
+    scene,
+    relationshipRows,
+    groupMembers,
+    preferenceContext,
+    overlayWarnings
+  );
 
   var locationId = stateValue_(state, 'player.location_id') || scene.location_id || 'UNKNOWN_LOCATION';
   var health = numberOrBlank_(stateValue_(state, 'player.health'));
@@ -3881,7 +3894,7 @@ function characterProfileToOverlay_(profile) {
     id: profile.entityId,
     name: profile.displayName,
     status: profile.status,
-    role: profile.groupRole || 'Rolle noch nicht festgelegt',
+    role: profile.groupRole ? echoPhase4RoleLabel_(profile.groupRole) : 'Rolle noch nicht festgelegt',
     expertise: {
       primary: profile.primaryExpertise,
       secondary: profile.secondaryExpertise
@@ -4657,14 +4670,6 @@ function getEchoAuthoritativeContext_(options) {
   var groupMembers = echoPhase2GroupMembersForContext_(warnings);
   var itemRows = echoPhase2Rows_(ECHO_CONFIG.sheets.items, warnings);
   var preferenceContext = getEchoPreferenceContext_({ includeAudit: !!options.includePrivate });
-  var projections = echoPhase4BuildProjections_(
-    state,
-    null,
-    relationshipRows,
-    groupMembers,
-    preferenceContext,
-    warnings
-  );
 
   var canonical = {
     canon: echoPhase2LockedRows_('CANON', warnings),
@@ -4695,6 +4700,14 @@ function getEchoAuthoritativeContext_(options) {
   );
   var currentScene = latestBySequence_(playableScenes) || {};
   var openQuestions = echoPhase2Rows_('OPEN_QUESTIONS', warnings, { statuses: ['OPEN', 'ACTIVE'] });
+  var projections = echoPhase4BuildProjections_(
+    state,
+    currentScene,
+    relationshipRows,
+    groupMembers,
+    preferenceContext,
+    warnings
+  );
 
   var context = {
     context_version: 'phase-4',
