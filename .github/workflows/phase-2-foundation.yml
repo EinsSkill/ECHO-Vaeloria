@@ -1,8 +1,8 @@
-name: Phase 6 scene readback and commit completeness
+name: Phase 7 event reconciliation and identity protection
 
 on:
   push:
-    branches: [main, phase-3c-overlay-delivery, phase-4-state-projections, phase-5-context-binding, phase-6-scene-readback]
+    branches: [main, phase-3c-overlay-delivery, phase-4-state-projections, phase-5-context-binding, phase-6-scene-readback, phase-7-event-reconciliation]
   pull_request:
     branches: [main]
 
@@ -34,3 +34,5 @@ jobs:
         run: node tests/phase-5-context-binding.test.js
       - name: Run Phase 6 checks
         run: node tests/phase-6-scene-readback.test.js
+      - name: Run Phase 7 checks
+        run: node tests/phase-7-event-reconciliation.test.js
