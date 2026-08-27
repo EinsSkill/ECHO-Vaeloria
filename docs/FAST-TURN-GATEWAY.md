@@ -165,3 +165,14 @@ Ein HTTP-Gateway allein beschleunigt einen ChatGPT-Spielzug nur dann vollständi
 3. ein kurzer Readback der neuen Zeile
 
 Der Gateway ist bereits die richtige Backend-Grenze für einen späteren direkten ECHO-Connector und entfernt dann die Sheet-Orchestrierung vollständig aus dem Spielleiter-Client.
+
+## Kontextbindung gegen veraltete Züge
+
+Der Runtime-Read liefert neben dem Kontext auch einen context_fingerprint. Ein neuer Connector sollte diesen Wert unverändert als context_fingerprint im Turn-Objekt mitführen. Der Processor liest den vollständigen autoritativen Workbook-Kontext unmittelbar vor dem Commit erneut:
+
+- MATCHED: der Zug darf weiterverarbeitet werden;
+- STALE: der Zug wird vor dem ersten Event-/Scene-/State-Schreibvorgang abgelehnt;
+- NOT_PROVIDED: ältere Clients bleiben kompatibel, verzichten aber auf diesen Schutz;
+- UNAVAILABLE: ein vorhandener Fingerprint wird nicht ohne frischen Kontext akzeptiert.
+
+Nach STALE muss der Connector den Runtime-Kontext erneut lesen und den Zug auf dieser Basis neu erzeugen. Die Prüfung ist eine zusätzliche Konsistenzgrenze und ersetzt weder die Inbox-Idempotenz noch die normale Ereignisvalidierung.
