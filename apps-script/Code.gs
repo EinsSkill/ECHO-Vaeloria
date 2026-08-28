@@ -50,6 +50,8 @@ var ECHO_PHASE12_STALE_PROCESSING_AFTER_MS_ = 180000;
 var ECHO_PHASE12_MAX_CLIENT_RETRY_COUNT_ = 2;
 var ECHO_PHASE14_RELATIONSHIP_VERSION = '1.0.0';
 var ECHO_PHASE15_GROUP_VERSION = '1.0.0';
+var ECHO_PHASE16_INTIMACY_VERSION = '1.0.0';
+var ECHO_PHASE16_INTIMACY_CONTRACT_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -191,6 +193,9 @@ function doGet(e) {
   }
   if (action === 'group-contract') {
     return jsonOutput_(echoGetGroupContract());
+  }
+  if (action === 'intimacy-contract') {
+    return jsonOutput_(echoGetIntimacyContract());
   }
   if (action === 'context-binding-contract') {
     return jsonOutput_(echoGetContextBindingContract());
@@ -485,6 +490,7 @@ function validateEventShape_(event) {
     validateCharacterProfileUpdates_(event.character_profile_updates);
   }
   validatePhase2EventUpdates_(event);
+  echoPhase16ValidateIntimacy_(event);
 
   Object.keys(event.relationship_updates).forEach(function (stateId) {
     normalizeRelationshipPatch_(event.relationship_updates[stateId] || {}, stateId);
@@ -682,8 +688,8 @@ function setupEchoSchema() {
     'consent_state', 'boundaries_json', 'intimacy_phase', 'intimacy_profile_json',
     'teaching'
   ]);
-  ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode', 'resolution_json', 'resolution_mode', 'resolution_outcome']);
-  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'scene_blocks_json', 'scene_contract_version', 'resolution_json']);
+  ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode', 'intimacy_guard_json', 'resolution_json', 'resolution_mode', 'resolution_outcome']);
+  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'intimacy_guard_json', 'scene_blocks_json', 'scene_contract_version', 'resolution_json']);
   return {
     ok: true,
     phase2: phase2,
@@ -1395,6 +1401,10 @@ function echoPhase6SceneReadback_(row, expected) {
   if (!blocks.length) errors.push('visible scene blocks missing');
 
   var formatted = blocks.length ? sceneTextFromBlocks_(blocks, '') : '';
+  var intimacy = echoPhase16NormalizeIntimacy_(row, { legacyRead: true });
+  if (intimacy.status === 'BLOCKED') {
+    errors.push('intimacy_guard invalid: ' + intimacy.reasons.join('; '));
+  }
   var narrativeText = String(row.narrative_text || '')
     .replace(/\r\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
@@ -1784,7 +1794,7 @@ function echoOverlayContract_() {
         'feedId', 'eventId', 'sceneId', 'revisionId', 'revisionNumber',
         'title', 'narrativeText', 'formattedText', 'text', 'blocks',
         'dialoguePresentation', 'resolution', 'sceneType', 'status', 'locationId',
-        'sceneContractVersion', 'resolutionContractVersion'
+        'sceneContractVersion', 'resolutionContractVersion', 'intimacyGuard'
       ],
       blocks_source: 'SCENE_FEED.scene_blocks_json',
       rendering_rule: 'Render visible blocks in order; apply blocks[].cssClass/presentation. Use formattedText/text only as a legacy fallback.',
@@ -1970,7 +1980,8 @@ function echoGetSceneContract() {
     preference_projection_contract: echoPreferenceProjectionContract_(),
     validation_contract: echoValidationReportContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
-    commit_reconciliation_contract: echoCommitReconciliationContract_()
+    commit_reconciliation_contract: echoCommitReconciliationContract_(),
+    intimacy_contract: echoIntimacyContract_()
   };
 }
 
@@ -2012,6 +2023,7 @@ function validateSceneCorrection_(event) {
     throw new Error('scene.available_actions_json must be an array');
   }
   validateSceneBlocks_(event.scene);
+  echoPhase16ValidateIntimacy_(event);
 }
 
 function commitSceneCorrection_(event) {
@@ -2403,6 +2415,333 @@ function mergeConditions_(base, additions, removals, duration, eventId) {
   return result;
 }
 
+
+/* ===== Phase 16: intimacy, consent and safety contract ===== */
+
+// Phase 16 is a gate, not a story generator. It decides whether an incoming
+// event may carry an intimacy mode. The scene prose remains workbook-backed
+// and is rendered only after the normal commit/readback path succeeds.
+
+var ECHO_PHASE16_INTIMACY_MODES_ = {
+  NONE: true,
+  TENSION: true,
+  DARK_ROMANCE: true,
+  POWER_EXCHANGE: true,
+  INTIMACY: true,
+  FADE_TO_BLACK: true
+};
+
+var ECHO_PHASE16_INTIMACY_MODE_ALIASES_ = {
+  '': 'NONE',
+  NONE: 'NONE',
+  NONEXPLICIT: 'DARK_ROMANCE',
+  NON_EXPLICIT: 'DARK_ROMANCE',
+  DARK: 'DARK_ROMANCE',
+  BDSM: 'POWER_EXCHANGE',
+  POWEREXCHANGE: 'POWER_EXCHANGE',
+  POWER_EXCHANGE: 'POWER_EXCHANGE',
+  SEXUAL_TENSION: 'TENSION',
+  ROMANTIC_TENSION: 'TENSION',
+  SEX: 'INTIMACY',
+  EXPLICIT: 'INTIMACY',
+  FADE: 'FADE_TO_BLACK'
+};
+
+var ECHO_PHASE16_ALLOWED_CONSENT_ = {
+  OPEN: true,
+  NEGOTIATED: true
+};
+
+var ECHO_PHASE16_BLOCKED_CONSENT_ = {
+  UNKNOWN: true,
+  PAUSED: true,
+  REVOKED: true
+};
+
+var ECHO_PHASE16_ALLOWED_BASES_ = {
+  EXPLICIT_CURRENT_REQUEST: true,
+  ESTABLISHED_NEGOTIATED_DYNAMIC: true,
+  RECONFIRMED: true
+};
+
+var ECHO_PHASE16_ACTIVE_MODES_ = {
+  DARK_ROMANCE: true,
+  POWER_EXCHANGE: true,
+  INTIMACY: true,
+  FADE_TO_BLACK: true
+};
+
+function echoIntimacyContract_() {
+  return {
+    version: ECHO_PHASE16_INTIMACY_CONTRACT_VERSION,
+    phase: 16,
+    source_of_truth: 'ECHO_WORKBOOK',
+    mode_field: 'intimacy_mode',
+    guard_field: 'intimacy_guard_json',
+    active_modes: Object.keys(ECHO_PHASE16_ACTIVE_MODES_),
+    non_active_modes: ['NONE', 'TENSION'],
+    allowed_consent_states: ['OPEN', 'NEGOTIATED'],
+    blocked_consent_states: ['UNKNOWN', 'PAUSED', 'REVOKED'],
+    accepted_consent_bases: Object.keys(ECHO_PHASE16_ALLOWED_BASES_),
+    required_gate_fields: [
+      'consent_state',
+      'consent_basis',
+      'boundaries_checked',
+      'content_policy',
+      'stop_and_pause_supported'
+    ],
+    content_policy: 'NON_GRAPHIC_FADE_TO_BLACK',
+    statuses: ['NOT_APPLICABLE', 'READY', 'BLOCKED', 'LEGACY_EXTERNAL_REVIEW'],
+    stop_policy: 'Stopp and Pause block further intimacy until a new consent gate is recorded.',
+    legacy_policy: 'Existing rows with an intimacy mode but without a guard remain readable and are marked LEGACY_EXTERNAL_REVIEW; they are not rewritten.',
+    write_policy: 'New intimate events are rejected before commit unless the normalized guard is READY.',
+    narrative_policy: 'The guard controls eligibility only. Narrative stays in SCENE_FEED and is not returned in chat.'
+  };
+}
+
+function echoGetIntimacyContract() {
+  return {
+    ok: true,
+    contract: echoIntimacyContract_()
+  };
+}
+
+function echoPhase16String_(value) {
+  return String(value === undefined || value === null ? '' : value).trim();
+}
+
+function echoPhase16Boolean_(value) {
+  if (value === true || value === false) return value;
+  var normalized = echoPhase16String_(value).toUpperCase();
+  if (['TRUE', 'YES', 'JA', '1'].indexOf(normalized) !== -1) return true;
+  if (['FALSE', 'NO', 'NEIN', '0'].indexOf(normalized) !== -1) return false;
+  return null;
+}
+
+function echoPhase16Array_(value) {
+  var result = value;
+  if (typeof result === 'string') {
+    try {
+      result = JSON.parse(result);
+    } catch (error) {
+      result = result ? [result] : [];
+    }
+  }
+  if (!Array.isArray(result)) return [];
+  return result.map(function (item) {
+    if (item && typeof item === 'object') {
+      return item.id || item.entity_id || item.entityId || item.name || '';
+    }
+    return String(item || '').trim();
+  }).filter(function (item) { return !!String(item || '').trim(); }).slice(0, 20);
+}
+
+function echoPhase16ParseObject_(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch (error) {
+      return {};
+    }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function echoPhase16RawGuard_(value) {
+  value = value || {};
+  var candidates = [
+    value.intimacy_guard,
+    value.intimacy_guard_json,
+    value.scene && value.scene.intimacy_guard,
+    value.scene && value.scene.intimacy_guard_json
+  ];
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = echoPhase16ParseObject_(candidates[i]);
+    if (Object.keys(candidate).length) return candidate;
+  }
+  return {};
+}
+
+function echoPhase16NormalizeMode_(value) {
+  var normalized = echoPhase16String_(value).toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (ECHO_PHASE16_INTIMACY_MODE_ALIASES_[normalized]) {
+    return ECHO_PHASE16_INTIMACY_MODE_ALIASES_[normalized];
+  }
+  return ECHO_PHASE16_INTIMACY_MODES_[normalized] ? normalized : 'UNKNOWN';
+}
+
+function echoPhase16ActiveMode_(value) {
+  value = value || {};
+  var guard = echoPhase16RawGuard_(value);
+  var mode = guard.mode || guard.intimacy_mode ||
+    value.intimacy_mode ||
+    (value.scene && value.scene.intimacy_mode) ||
+    '';
+  return echoPhase16NormalizeMode_(mode);
+}
+
+function echoPhase16ConsentFromUpdates_(event) {
+  var updates = event && event.relationship_updates;
+  if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return '';
+  var found = '';
+  Object.keys(updates).some(function (stateId) {
+    var patch = updates[stateId];
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return false;
+    var candidate = echoPhase16String_(patch.consent_state || patch.consent_profile).toUpperCase();
+    if (ECHO_PHASE16_ALLOWED_CONSENT_[candidate] ||
+        ECHO_PHASE16_BLOCKED_CONSENT_[candidate]) {
+      found = candidate;
+      return true;
+    }
+    return false;
+  });
+  return found;
+}
+
+function echoPhase16ConsentState_(value, guard) {
+  value = value || {};
+  guard = guard || {};
+  var raw = guard.consent_state || guard.consent || value.consent_state ||
+    value.consent_profile || echoPhase16ConsentFromUpdates_(value) || 'UNKNOWN';
+  var normalized = echoPhase16String_(raw).toUpperCase();
+  return ECHO_PHASE16_ALLOWED_CONSENT_[normalized] ||
+    ECHO_PHASE16_BLOCKED_CONSENT_[normalized]
+    ? normalized
+    : 'UNKNOWN';
+}
+
+function echoPhase16ConsentBasis_(value, guard, consentState) {
+  value = value || {};
+  guard = guard || {};
+  var explicit = echoPhase16Boolean_(
+    guard.explicit_current_request !== undefined
+      ? guard.explicit_current_request
+      : guard.current_request_reconfirmed
+  );
+  var raw = echoPhase16String_(guard.consent_basis || guard.basis).toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (explicit === true) return 'EXPLICIT_CURRENT_REQUEST';
+  if (!raw && echoPhase16ConsentFromUpdates_(value)) {
+    return consentState === 'NEGOTIATED'
+      ? 'ESTABLISHED_NEGOTIATED_DYNAMIC'
+      : '';
+  }
+  return ECHO_PHASE16_ALLOWED_BASES_[raw] ? raw : '';
+}
+
+function echoPhase16ContentPolicy_(guard) {
+  var raw = echoPhase16String_(
+    guard.content_policy || guard.output_policy || guard.render_policy
+  ).toUpperCase().replace(/[\s-]+/g, '_');
+  if (['NON_GRAPHIC_FADE_TO_BLACK', 'NON_GRAPHIC', 'FADE_TO_BLACK'].indexOf(raw) !== -1) {
+    return 'NON_GRAPHIC_FADE_TO_BLACK';
+  }
+  return raw || '';
+}
+
+function echoPhase16StopSupported_(guard) {
+  var direct = echoPhase16Boolean_(
+    guard.stop_and_pause_supported !== undefined
+      ? guard.stop_and_pause_supported
+      : (guard.stop_supported !== undefined
+        ? guard.stop_supported
+        : guard.safety_acknowledged)
+  );
+  return direct === true || !!echoPhase16String_(guard.stop_word || guard.pause_signal);
+}
+
+function echoPhase16HasGuard_(guard) {
+  return !!guard && Object.keys(guard).length > 0;
+}
+
+function echoPhase16LegacyRead_(options) {
+  return !!(options && options.legacyRead);
+}
+
+function echoPhase16NormalizeIntimacy_(value, options) {
+  value = value || {};
+  options = options || {};
+  var guard = echoPhase16RawGuard_(value);
+  var mode = echoPhase16ActiveMode_(value);
+  var consentState = echoPhase16ConsentState_(value, guard);
+  var basis = echoPhase16ConsentBasis_(value, guard, consentState);
+  var boundariesChecked = echoPhase16Boolean_(
+    guard.boundaries_checked !== undefined
+      ? guard.boundaries_checked
+      : guard.boundaries_acknowledged
+  ) === true;
+  var contentPolicy = echoPhase16ContentPolicy_(guard);
+  var stopAndPauseSupported = echoPhase16StopSupported_(guard);
+  var participants = echoPhase16Array_(
+    guard.participants || guard.participant_ids ||
+    guard.involved_entities || value.participant_ids
+  );
+  var reasons = [];
+  var status = 'NOT_APPLICABLE';
+
+  if (mode === 'UNKNOWN') {
+    status = 'BLOCKED';
+    reasons.push('unsupported_intimacy_mode');
+  } else if (ECHO_PHASE16_ACTIVE_MODES_[mode]) {
+    if (!echoPhase16HasGuard_(guard)) {
+      status = echoPhase16LegacyRead_(options)
+        ? 'LEGACY_EXTERNAL_REVIEW'
+        : 'BLOCKED';
+      reasons.push('intimacy_guard_missing');
+    } else {
+      if (!ECHO_PHASE16_ALLOWED_CONSENT_[consentState]) {
+        reasons.push('consent_not_active:' + consentState);
+      }
+      if (!ECHO_PHASE16_ALLOWED_BASES_[basis]) {
+        reasons.push('consent_basis_missing_or_invalid');
+      }
+      if (!boundariesChecked) reasons.push('boundaries_not_checked');
+      if (contentPolicy !== 'NON_GRAPHIC_FADE_TO_BLACK') {
+        reasons.push('content_policy_must_be_non_graphic_fade_to_black');
+      }
+      if (!stopAndPauseSupported) reasons.push('stop_and_pause_not_supported');
+      status = reasons.length ? 'BLOCKED' : 'READY';
+    }
+  }
+
+  return {
+    version: ECHO_PHASE16_INTIMACY_VERSION,
+    mode: mode,
+    status: status,
+    eligible: status === 'READY',
+    consentState: consentState,
+    consentBasis: basis || null,
+    boundariesChecked: boundariesChecked,
+    contentPolicy: contentPolicy || null,
+    stopAndPauseSupported: stopAndPauseSupported,
+    participants: participants,
+    reasons: reasons,
+    source: echoPhase16HasGuard_(guard)
+      ? 'EVENT_INTIMACY_GUARD'
+      : (echoPhase16ConsentFromUpdates_(value) ? 'RELATIONSHIP_UPDATE' : 'WORKBOOK_OR_LEGACY_ROW')
+  };
+}
+
+function echoPhase16ValidateIntimacy_(event) {
+  var normalized = echoPhase16NormalizeIntimacy_(event);
+  if (normalized.mode === 'UNKNOWN') {
+    throw new Error('Unsupported intimacy_mode. Use a supported Phase-16 mode.');
+  }
+  if (normalized.status === 'BLOCKED') {
+    throw new Error(
+      'Intimacy guard rejected: ' + (normalized.reasons || ['invalid_guard']).join('; ')
+    );
+  }
+  return normalized;
+}
+
+function echoPhase16EventMode_(event) {
+  var normalized = echoPhase16NormalizeIntimacy_(event);
+  return normalized.mode === 'NONE' ? '' : normalized.mode;
+}
+
 // ===== Read-only overlay projection =====
 
 // ECHO read-only overlay state projection.
@@ -2445,6 +2784,7 @@ function overlaySceneDeliveryPayload_(scene) {
     mood: scene.mood || 'unbestimmt',
     contentRating: scene.content_rating || '',
     intimacyMode: scene.intimacy_mode || '',
+    intimacyGuard: echoPhase16NormalizeIntimacy_(scene, { legacyRead: true }),
     availableActions: actionsFromScene_(scene.available_actions_json),
     sceneContractVersion: scene.scene_contract_version || ECHO_SCENE_CONTRACT_VERSION,
     resolutionContractVersion: ECHO_RESOLUTION_CONTRACT_VERSION,
@@ -3397,6 +3737,7 @@ function getOverlayState_() {
 
     relationshipContract: echoRelationshipDirectoryContract_(),
     groupContract: echoGroupMembershipContract_(),
+    intimacyContract: echoIntimacyContract_(),
     relationshipProfiles: preferenceContext.characters
       .filter(function (profile) {
         return !isTechnicalRelationshipPlaceholder_({ entity_b: profile.entityId });
@@ -6292,6 +6633,68 @@ function echoRelationshipOverlays_(rows, profiles) {
   return result;
 }
 
+
+var ECHO_PHASE2_SCHEMA_VERSION = '1.1.0';
+
+var ECHO_PHASE2_SCHEMA_ = {
+  TURN_INBOX: [
+    'turn_id', 'chat_id', 'received_at', 'raw_input', 'parsed_intent_json',
+    'validation_status', 'commit_event_id', 'ui_feed_id', 'error_code',
+    'processed_at', 'processing_token', 'attempt_count', 'transaction_id',
+    'locked_at', 'context_fingerprint', 'context_read_at'
+  ],
+  EVENT_LOG: [
+    'event_id', 'run_id', 'sequence', 'timestamp', 'chat_id', 'event_type',
+    'player_action', 'narrative_summary', 'state_changes_json', 'new_flags',
+    'affected_entities', 'canonicality', 'source', 'reversible', 'notes',
+    'content_rating', 'intimacy_mode', 'intimacy_guard_json',
+    'resolution_json', 'resolution_mode', 'resolution_outcome', 'turn_id',
+    'transaction_id', 'revision_id', 'committed_at', 'payload_fingerprint'
+  ],
+  SCENE_FEED: [
+    'feed_id', 'run_id', 'sequence', 'event_id', 'scene_type', 'title',
+    'location_id', 'narrative_text', 'scene_blocks_json',
+    'scene_contract_version', 'resolution_json', 'mood',
+    'visible_changes_json', 'available_actions_json', 'portraits_json',
+    'map_delta_json', 'relationship_delta_json', 'status', 'content_rating',
+    'intimacy_mode', 'intimacy_guard_json', 'scene_id', 'revision_id',
+    'revision_number', 'supersedes_feed_id', 'is_current', 'transaction_id',
+    'created_at'
+  ],
+  SCENE_REVISIONS: [
+    'revision_id', 'scene_id', 'feed_id', 'revision_number', 'event_id',
+    'source_event_id', 'turn_id', 'source_feed_id', 'supersedes_feed_id',
+    'reason', 'created_at', 'transaction_id', 'payload_fingerprint'
+  ],
+  TURN_TRANSACTIONS: [
+    'transaction_id', 'turn_id', 'event_id', 'status', 'created_at',
+    'updated_at', 'attempt', 'payload_fingerprint', 'plan_json',
+    'event_logged_at', 'scene_revision_at', 'state_applied_at',
+    'relationships_applied_at', 'items_applied_at', 'group_members_applied_at',
+    'preferences_applied_at', 'profiles_applied_at', 'committed_at',
+    'error_code', 'recovery_action', 'context_fingerprint', 'ui_feed_id',
+    'revision_id'
+  ],
+  ITEM_STATE: [
+    'item_id', 'display_name', 'item_type', 'owner_type', 'owner_id',
+    'location_id', 'status', 'metadata_json', 'last_event_id', 'updated_at',
+    'source', 'revision'
+  ],
+  GROUP_MEMBERS: [
+    'member_id', 'group_id', 'entity_id', 'display_name', 'role', 'status',
+    'joined_at', 'left_at', 'position', 'traits_json', 'boundaries_json',
+    'last_event_id', 'updated_at', 'source'
+  ],
+  RELATIONSHIP_STATE: [
+    'state_id', 'entity_a', 'entity_b', 'trust', 'desire', 'respect', 'fear',
+    'intimacy', 'power_gap', 'dependence', 'agency', 'resentment',
+    'consent_profile', 'status', 'last_event_id', 'notes', 'tension', 'safety',
+    'dominance', 'submission', 'consent_state', 'boundaries_json',
+    'intimacy_phase', 'intimacy_profile_json', 'teaching', 'updated_at',
+    'transaction_id'
+  ]
+};
+
 function echoPhase2GetOrCreateSheet_(name) {
   var ss = echoSpreadsheet_();
   var sheet = ss.getSheetByName(name);
@@ -6874,7 +7277,8 @@ function echoPhase2AppendSceneRevision_(event, options) {
     relationship_delta_json: jsonString_(scene.relationship_delta_json || {}),
     status: scene.status || 'PLAY',
     content_rating: scene.content_rating || event.content_rating || '',
-    intimacy_mode: scene.intimacy_mode || event.intimacy_mode || '',
+    intimacy_mode: echoPhase16EventMode_(event),
+    intimacy_guard_json: jsonString_(echoPhase16NormalizeIntimacy_(event)),
     resolution_json: jsonString_(resolution),
     scene_id: sceneId || feedId,
     revision_id: revisionId,
@@ -7321,7 +7725,8 @@ function echoPhase2CommitPlan_(event, options) {
           reversible: event.reversible === undefined ? 'TRUE' : String(event.reversible),
           notes: event.notes || '',
           content_rating: event.content_rating || '',
-          intimacy_mode: event.intimacy_mode || '',
+          intimacy_mode: echoPhase16EventMode_(event),
+          intimacy_guard_json: jsonString_(echoPhase16NormalizeIntimacy_(event)),
           resolution_json: jsonString_(resolution),
           resolution_mode: resolution.mode || '',
           resolution_outcome: resolution.outcome || '',
