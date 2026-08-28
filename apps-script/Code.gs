@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-14-relationship-safety-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-15-group-membership-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -49,6 +49,7 @@ var ECHO_PHASE12_STATE_WAKE_PROBE_TTL_SECONDS_ = 5;
 var ECHO_PHASE12_STALE_PROCESSING_AFTER_MS_ = 180000;
 var ECHO_PHASE12_MAX_CLIENT_RETRY_COUNT_ = 2;
 var ECHO_PHASE14_RELATIONSHIP_VERSION = '1.0.0';
+var ECHO_PHASE15_GROUP_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -187,6 +188,9 @@ function doGet(e) {
   }
   if (action === 'relationship-contract') {
     return jsonOutput_(echoGetRelationshipContract());
+  }
+  if (action === 'group-contract') {
+    return jsonOutput_(echoGetGroupContract());
   }
   if (action === 'context-binding-contract') {
     return jsonOutput_(echoGetContextBindingContract());
@@ -2567,6 +2571,78 @@ function echoPhase4MembershipRole_(row, profile) {
     : '';
 }
 
+function echoGroupMembershipContract_() {
+  return {
+    version: ECHO_PHASE15_GROUP_VERSION,
+    phase: 15,
+    source_of_truth: 'ECHO_WORKBOOK',
+    membership_source: 'GROUP_MEMBERS',
+    profile_source: 'ECHO_CHARACTER_PROFILES',
+    group_policy_source: 'ECHO_PREFERENCE_PROFILE',
+    active_statuses: ['ACTIVE', 'OPEN', 'CURRENT', 'PLAY', 'NEGOTIATED', 'LOCKED', 'UNINITIALIZED'],
+    terminal_statuses: ['LEFT', 'INACTIVE'],
+    duplicate_policy: 'Latest active row by member_id, otherwise by group_id and canonical entity_id.',
+    player_policy: 'The player is not synthesized as a GROUP_MEMBERS row; player inclusion and circle position are exposed only when the preference profile states them.',
+    guest_policy: 'Guest eligibility and participation rules are read from the group preference profile; no guest is created from preference data alone.',
+    recruitment_policy: 'A new character becomes a member only through a committed group_member_updates event and an active GROUP_MEMBERS row.',
+    role_policy: 'Roles, positions and expertise are source-backed; missing role data remains unknown.',
+    guarantees: [
+      'No placeholder member is rendered.',
+      'A member row is never duplicated by stale history.',
+      'A profile, a relationship and a group membership remain separate sources.',
+      'The target roster size is metadata, not proof that members already exist.'
+    ]
+  };
+}
+
+function echoGetGroupContract() {
+  return {
+    ok: true,
+    contract: echoGroupMembershipContract_()
+  };
+}
+
+function echoPhase15GroupPolicy_(groupPreferences) {
+  groupPreferences = groupPreferences || {};
+  var structure = groupPreferences.structure || {};
+  var targetSize = structure.target_size || {};
+  var circleModel = structure.circle_model || {};
+  var joiningModel = structure.joining_model || {};
+  var guestPolicy = (groupPreferences.guests || {}).guest_policy || {};
+
+  var numeric = function (value) {
+    var number = Number(value);
+    return isFinite(number) && number >= 0 ? number : null;
+  };
+  var booleanOrNull = function (value) {
+    return typeof value === 'boolean' ? value : null;
+  };
+
+  return {
+    targetSize: {
+      women: numeric(targetSize.women),
+      totalPeople: numeric(targetSize.total_people),
+      playerIncluded: booleanOrNull(targetSize.player_is_included)
+    },
+    circleModel: circleModel,
+    joiningModel: joiningModel,
+    guestPolicy: guestPolicy,
+    playerCenter: booleanOrNull(circleModel.player_center_ruler),
+    equalPowerCircle: booleanOrNull(circleModel.equal_power_circle)
+  };
+}
+
+function echoPhase15MembershipKey_(row, profileByEntity) {
+  row = row || {};
+  var memberId = String(row.member_id || '').trim();
+  if (memberId) return 'member:' + memberId;
+
+  var rawEntityId = String(row.entity_id || '').trim();
+  var entityId = echoPhase4CanonicalEntityId_(rawEntityId, profileByEntity);
+  var groupId = String(row.group_id || '').trim();
+  return entityId && groupId ? 'entity:' + groupId + '|' + entityId : '';
+}
+
 function echoPhase4NormalizeMembership_(row, profileByEntity) {
   row = row || {};
   if (!echoPhase4GroupMembershipActive_(row)) return null;
@@ -2584,6 +2660,12 @@ function echoPhase4NormalizeMembership_(row, profileByEntity) {
   if (!traits || typeof traits !== 'object' || Array.isArray(traits)) traits = {};
   if (!Array.isArray(boundaries)) boundaries = [];
 
+  var memberKind = String(
+    traits.member_kind || traits.membership_type || traits.kind || ''
+  ).trim();
+  var guestFlag = traits.is_guest === true || traits.guest === true ||
+    String(memberKind).toLowerCase() === 'guest';
+
   return {
     memberId: echoPhase4ValueOrNull_(row.member_id),
     groupId: groupId,
@@ -2595,6 +2677,8 @@ function echoPhase4NormalizeMembership_(row, profileByEntity) {
     joinedAt: echoPhase4ValueOrNull_(row.joined_at),
     leftAt: echoPhase4ValueOrNull_(row.left_at),
     position: echoPhase4ValueOrNull_(row.position),
+    memberKind: memberKind || 'unknown',
+    isGuest: guestFlag,
     traits: traits,
     boundaries: boundaries,
     source: 'GROUP_MEMBERS'
@@ -2618,9 +2702,19 @@ function echoPhase4MembershipCompare_(left, right) {
 }
 
 function echoPhase4GroupMemberships_(rows, profileByEntity) {
-  return (rows || [])
-    .map(function (row) {
-      return echoPhase4NormalizeMembership_(row, profileByEntity);
+  var newest = {};
+
+  (rows || []).forEach(function (row) {
+    var key = echoPhase15MembershipKey_(row, profileByEntity);
+    if (!key || !echoPhase4GroupMembershipActive_(row)) return;
+    if (!newest[key] || echoPhase4RowIsLater_(row, newest[key])) {
+      newest[key] = row;
+    }
+  });
+
+  return Object.keys(newest)
+    .map(function (key) {
+      return echoPhase4NormalizeMembership_(newest[key], profileByEntity);
     })
     .filter(function (membership) {
       return !!membership;
@@ -2662,8 +2756,9 @@ function echoPhase4RelationshipProfile_(profile) {
   });
 }
 
-function echoPhase4ProjectGroups_(rows, profiles) {
+function echoPhase4ProjectGroups_(rows, profiles, groupPreferences) {
   var profileByEntity = characterProfilesByEntity_(profiles || []);
+  var policy = echoPhase15GroupPolicy_(groupPreferences || {});
   var groups = {};
 
   echoPhase4GroupMemberships_(rows, profileByEntity).forEach(function (membership) {
@@ -2673,18 +2768,45 @@ function echoPhase4ProjectGroups_(rows, profiles) {
         label: membership.groupId,
         active: true,
         memberCount: 0,
+        activeMemberCount: 0,
+        knownGuestCount: 0,
         members: [],
+        rosterPolicy: policy,
         source: 'GROUP_MEMBERS'
       };
     }
     groups[membership.groupId].members.push(membership);
     groups[membership.groupId].memberCount += 1;
+    groups[membership.groupId].activeMemberCount += membership.active ? 1 : 0;
+    if (membership.isGuest) groups[membership.groupId].knownGuestCount += 1;
   });
 
   return Object.keys(groups)
     .sort(echoPhase4CompareText_)
     .map(function (groupId) {
-      return groups[groupId];
+      var group = groups[groupId];
+      var target = policy.targetSize;
+      var playerCount = target.playerIncluded === true ? 1 : 0;
+      var projectedTotal = group.activeMemberCount + playerCount;
+      var targetTotal = target.totalPeople;
+      group.player = {
+        includedByPolicy: target.playerIncluded,
+        presentAsMemberRow: false,
+        projectedOccupantCount: target.playerIncluded === null ? null : projectedTotal
+      };
+      group.capacity = {
+        targetWomen: target.women,
+        targetTotalPeople: targetTotal,
+        knownActiveMemberCount: group.activeMemberCount,
+        projectedOccupantCount: group.player.projectedOccupantCount,
+        remainingSlots: targetTotal === null || group.player.projectedOccupantCount === null
+          ? null
+          : Math.max(0, targetTotal - group.player.projectedOccupantCount),
+        rosterComplete: targetTotal !== null && group.player.projectedOccupantCount !== null
+          ? group.player.projectedOccupantCount >= targetTotal
+          : null
+      };
+      return group;
     });
 }
 
@@ -2826,7 +2948,7 @@ function echoPhase4BuildProjections_(state, scene, relationshipRows, groupRows, 
     profiles,
     characterPreferences
   );
-  var groups = echoPhase4ProjectGroups_(groupRows, profiles);
+  var groups = echoPhase4ProjectGroups_(groupRows, profiles, preferenceContext.group || {});
   var relationships = characters.map(function (character) {
     return character.relationship;
   });
@@ -3274,6 +3396,7 @@ function getOverlayState_() {
     groups: projections.groups,
 
     relationshipContract: echoRelationshipDirectoryContract_(),
+    groupContract: echoGroupMembershipContract_(),
     relationshipProfiles: preferenceContext.characters
       .filter(function (profile) {
         return !isTechnicalRelationshipPlaceholder_({ entity_b: profile.entityId });
