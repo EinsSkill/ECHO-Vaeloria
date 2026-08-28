@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-15-group-membership-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-17-magic-progression-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -52,6 +52,8 @@ var ECHO_PHASE14_RELATIONSHIP_VERSION = '1.0.0';
 var ECHO_PHASE15_GROUP_VERSION = '1.0.0';
 var ECHO_PHASE16_INTIMACY_VERSION = '1.0.0';
 var ECHO_PHASE16_INTIMACY_CONTRACT_VERSION = '1.0.0';
+var ECHO_PHASE17_MAGIC_VERSION = '1.0.0';
+var ECHO_PHASE17_MAGIC_CONTRACT_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -196,6 +198,9 @@ function doGet(e) {
   }
   if (action === 'intimacy-contract') {
     return jsonOutput_(echoGetIntimacyContract());
+  }
+  if (action === 'magic-contract') {
+    return jsonOutput_(echoGetMagicContract());
   }
   if (action === 'context-binding-contract') {
     return jsonOutput_(echoGetContextBindingContract());
@@ -491,6 +496,7 @@ function validateEventShape_(event) {
   }
   validatePhase2EventUpdates_(event);
   echoPhase16ValidateIntimacy_(event);
+  echoPhase17ValidateMagicUpdates_(event);
 
   Object.keys(event.relationship_updates).forEach(function (stateId) {
     normalizeRelationshipPatch_(event.relationship_updates[stateId] || {}, stateId);
@@ -688,8 +694,8 @@ function setupEchoSchema() {
     'consent_state', 'boundaries_json', 'intimacy_phase', 'intimacy_profile_json',
     'teaching'
   ]);
-  ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode', 'intimacy_guard_json', 'resolution_json', 'resolution_mode', 'resolution_outcome']);
-  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'intimacy_guard_json', 'scene_blocks_json', 'scene_contract_version', 'resolution_json']);
+  ensureHeaders_(ECHO_CONFIG.sheets.eventLog, ['content_rating', 'intimacy_mode', 'intimacy_guard_json', 'magic_update_json', 'resolution_json', 'resolution_mode', 'resolution_outcome']);
+  ensureHeaders_(ECHO_CONFIG.sheets.sceneFeed, ['content_rating', 'intimacy_mode', 'intimacy_guard_json', 'magic_delta_json', 'scene_blocks_json', 'scene_contract_version', 'resolution_json']);
   return {
     ok: true,
     phase2: phase2,
@@ -1794,7 +1800,7 @@ function echoOverlayContract_() {
         'feedId', 'eventId', 'sceneId', 'revisionId', 'revisionNumber',
         'title', 'narrativeText', 'formattedText', 'text', 'blocks',
         'dialoguePresentation', 'resolution', 'sceneType', 'status', 'locationId',
-        'sceneContractVersion', 'resolutionContractVersion', 'intimacyGuard'
+        'sceneContractVersion', 'resolutionContractVersion', 'intimacyGuard', 'magicDelta'
       ],
       blocks_source: 'SCENE_FEED.scene_blocks_json',
       rendering_rule: 'Render visible blocks in order; apply blocks[].cssClass/presentation. Use formattedText/text only as a legacy fallback.',
@@ -1981,7 +1987,8 @@ function echoGetSceneContract() {
     validation_contract: echoValidationReportContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_(),
-    intimacy_contract: echoIntimacyContract_()
+    intimacy_contract: echoIntimacyContract_(),
+    magic_contract: echoPhase17MagicContract_()
   };
 }
 
@@ -2249,6 +2256,8 @@ function applyStateUpdates_(updates, eventId, now) {
       case 'item_updates':
       case 'group_member_updates':
       case 'group_updates':
+      case 'magic_updates':
+      case 'echo_updates':
         // Phase 2 has dedicated normalized projections for these updates.
         break;
       default:
@@ -2742,6 +2751,389 @@ function echoPhase16EventMode_(event) {
   return normalized.mode === 'NONE' ? '' : normalized.mode;
 }
 
+
+/* ===== Phase 17: workbook-backed ECHO / magic progression ===== */
+
+// Magic progression is stateful and explicit. Preferences describe direction and
+// pacing; they never create mastery, restoration, a relationship effect or a
+// numeric increase by themselves.
+
+var ECHO_PHASE17_MAGIC_UPDATE_FIELDS_ = {
+  stage: true,
+  resonance_stage: true,
+  mastery_profile: true,
+  echo_mastery_profile: true,
+  rune_glow_color: true,
+  paths: true,
+  abilities: true,
+  effects: true,
+  risk: true,
+  known_facts: true,
+  source_basis: true,
+  source: true,
+  trigger_kind: true,
+  trigger: true,
+  change_reason: true
+};
+
+var ECHO_PHASE17_MAGIC_SOURCE_ALIASES_ = {
+  EVENT: 'EXPLICIT_CURRENT_EVENT',
+  EXPLICIT: 'EXPLICIT_CURRENT_EVENT',
+  EXPLICIT_EVENT: 'EXPLICIT_CURRENT_EVENT',
+  STATE_SNAPSHOT: 'WORKBOOK_STATE',
+  WORKBOOK: 'WORKBOOK_STATE',
+  CANON: 'CANONICAL_RULE'
+};
+
+var ECHO_PHASE17_MAGIC_SOURCE_BASES_ = {
+  EXPLICIT_CURRENT_EVENT: true,
+  WORKBOOK_STATE: true,
+  CANONICAL_RULE: true
+};
+
+var ECHO_PHASE17_MAGIC_TRIGGER_ALIASES_ = {
+  SEX: 'INTIMACY',
+  SEXUAL_INTIMACY: 'INTIMACY',
+  BDSM: 'POWER_EXCHANGE',
+  POWEREXCHANGE: 'POWER_EXCHANGE',
+  FADE: 'FADE_TO_BLACK'
+};
+
+var ECHO_PHASE17_SENSITIVE_TRIGGERS_ = {
+  INTIMACY: true,
+  POWER_EXCHANGE: true,
+  FADE_TO_BLACK: true
+};
+
+function echoPhase17MagicContract_() {
+  return {
+    version: ECHO_PHASE17_MAGIC_CONTRACT_VERSION,
+    phase: 17,
+    source_of_truth: 'STATE_SNAPSHOT',
+    preference_source: 'ECHO_PREFERENCE_PROFILE',
+    state_keys: [
+      'player.echo_mastery_profile',
+      'player.resonance_stage',
+      'player.rune_glow_color',
+      'player.echo_paths',
+      'player.echo_abilities',
+      'player.echo_effects',
+      'player.echo_risk'
+    ],
+    update_channel: 'event.magic_updates or event.state_updates.magic_updates',
+    source_bases: Object.keys(ECHO_PHASE17_MAGIC_SOURCE_BASES_),
+    trigger_policy: 'A trigger records what the current event established; it never applies a preference-derived automatic gain.',
+    relationship_policy: 'Relationship, teasing, play, intimacy and ritual can matter only when the current event explicitly establishes a magic update and the workbook records it.',
+    preference_policy: 'Restoration, training, paths and risks from preferences are planned direction, not current fact.',
+    numeric_policy: 'No delta, increment, multiplier or percentage gain is accepted; mastery values must be written as an explicit source-backed profile.',
+    overlay_policy: 'Expose a compact stage/status and known rune color; hide exact mastery numbers in the player-facing overlay.',
+    risk_policy: 'Overload, pain, loss of control and lasting traces remain unknown until STATE_SNAPSHOT or a committed event establishes them.'
+  };
+}
+
+function echoGetMagicContract() {
+  return {
+    ok: true,
+    contract: echoPhase17MagicContract_()
+  };
+}
+
+function echoPhase17ParseObject_(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch (error) {
+      return {};
+    }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function echoPhase17String_(value) {
+  return String(value === undefined || value === null ? '' : value).trim();
+}
+
+function echoPhase17List_(value) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch (error) { value = [value]; }
+  }
+  if (!Array.isArray(value)) return [];
+  return value.map(function (item) {
+    if (item && typeof item === 'object') {
+      return item.id || item.key || item.name || item.label || '';
+    }
+    return String(item || '').trim();
+  }).filter(function (item) { return !!String(item || '').trim(); }).slice(0, 30);
+}
+
+function echoPhase17RawMagicUpdate_(value) {
+  value = value || {};
+  var candidates = [
+    value.magic_updates,
+    value.echo_updates,
+    value.magic_update_json,
+    value.magic_delta,
+    value.magic_delta_json,
+    value.scene && value.scene.magic_updates,
+    value.scene && value.scene.magic_delta_json,
+    value.state_updates && value.state_updates.magic_updates,
+    value.state_updates && value.state_updates.echo_updates
+  ];
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = echoPhase17ParseObject_(candidates[i]);
+    if (Object.keys(candidate).length) return candidate;
+  }
+  return {};
+}
+
+function echoPhase17NormalizeSourceBasis_(value) {
+  var source = echoPhase17String_(value).toUpperCase().replace(/[\s-]+/g, '_');
+  source = ECHO_PHASE17_MAGIC_SOURCE_ALIASES_[source] || source;
+  return ECHO_PHASE17_MAGIC_SOURCE_BASES_[source] ? source : '';
+}
+
+function echoPhase17NormalizeTrigger_(value) {
+  var trigger = echoPhase17String_(value).toUpperCase().replace(/[\s-]+/g, '_');
+  return ECHO_PHASE17_MAGIC_TRIGGER_ALIASES_[trigger] || trigger;
+}
+
+function echoPhase17NormalizeMagicUpdate_(value, options) {
+  value = value || {};
+  options = options || {};
+  var raw = echoPhase17RawMagicUpdate_(value);
+
+  // Stored normalized deltas are safe to project in read-only mode. Incoming
+  // events are always normalized from their untrusted raw fields again.
+  if (options.legacyRead && raw._phase17_normalized === true) return raw;
+
+  if (!Object.keys(raw).length) {
+    return {
+      _phase17_normalized: true,
+      version: ECHO_PHASE17_MAGIC_VERSION,
+      provided: false,
+      status: 'NOT_APPLICABLE',
+      sourceBasis: null,
+      triggerKind: null,
+      changedFields: [],
+      update: {},
+      reasons: []
+    };
+  }
+
+  var unknownFields = Object.keys(raw).filter(function (key) {
+    return !ECHO_PHASE17_MAGIC_UPDATE_FIELDS_[key];
+  });
+  var reasons = [];
+  if (unknownFields.length) reasons.push('unknown_magic_update_fields:' + unknownFields.join(','));
+
+  var sourceBasis = echoPhase17NormalizeSourceBasis_(
+    raw.source_basis || raw.source
+  );
+  if (!sourceBasis) reasons.push('source_basis_missing_or_invalid');
+
+  var triggerKind = echoPhase17NormalizeTrigger_(raw.trigger_kind || raw.trigger || '');
+  if (ECHO_PHASE17_SENSITIVE_TRIGGERS_[triggerKind]) {
+    var intimateInput = Object.assign({}, value);
+    if (!intimateInput.intimacy_mode &&
+        !(intimateInput.intimacy_guard || intimateInput.intimacy_guard_json)) {
+      intimateInput.intimacy_mode = triggerKind;
+    }
+    var intimacy = echoPhase16NormalizeIntimacy_(intimateInput);
+    if (!intimacy.eligible) reasons.push('intimacy_guard_required_for:' + triggerKind);
+  }
+
+  var update = {};
+  var changedFields = [];
+  function copy(field, outputField, transform) {
+    if (raw[field] === undefined) return;
+    var next = transform ? transform(raw[field]) : raw[field];
+    update[outputField] = next;
+    changedFields.push(outputField);
+  }
+
+  copy('stage', 'stage', echoPhase17String_);
+  if (raw.resonance_stage !== undefined && raw.stage === undefined) {
+    copy('resonance_stage', 'stage', echoPhase17String_);
+  }
+  if (raw.mastery_profile !== undefined || raw.echo_mastery_profile !== undefined) {
+    var profile = echoPhase17ParseObject_(
+      raw.mastery_profile !== undefined ? raw.mastery_profile : raw.echo_mastery_profile
+    );
+    if (!Object.keys(profile).length) reasons.push('mastery_profile_must_be_an_object');
+    if (profile.percent !== undefined) {
+      var percent = Number(profile.percent);
+      if (!isFinite(percent) || percent < 0 || percent > 100) {
+        reasons.push('mastery_profile.percent_out_of_range');
+      }
+    }
+    update.mastery_profile = profile;
+    changedFields.push('mastery_profile');
+  }
+  copy('rune_glow_color', 'rune_glow_color', echoPhase17String_);
+  copy('paths', 'paths', echoPhase17List_);
+  copy('abilities', 'abilities', echoPhase17List_);
+  copy('effects', 'effects', echoPhase17List_);
+  copy('risk', 'risk', function (rawRisk) {
+    return echoPhase17ParseObject_(rawRisk);
+  });
+  copy('known_facts', 'known_facts', echoPhase17List_);
+  var changeReason = echoPhase17String_(raw.change_reason);
+  if (changeReason) changedFields.push('change_reason');
+
+  if (!changedFields.length) reasons.push('magic_update_has_no_state_fields');
+
+  return {
+    _phase17_normalized: true,
+    version: ECHO_PHASE17_MAGIC_VERSION,
+    provided: true,
+    status: reasons.length ? 'BLOCKED' : 'RECORDED',
+    sourceBasis: sourceBasis || null,
+    triggerKind: triggerKind || null,
+    changeReason: changeReason || null,
+    changedFields: changedFields,
+    update: update,
+    reasons: reasons
+  };
+}
+
+function echoPhase17ValidateMagicUpdates_(event) {
+  var normalized = echoPhase17NormalizeMagicUpdate_(event);
+  if (normalized.status === 'BLOCKED') {
+    throw new Error(
+      'Magic update rejected: ' + (normalized.reasons || ['invalid_magic_update']).join('; ')
+    );
+  }
+  return normalized;
+}
+
+function echoPhase17ApplyMagicUpdates_(event, eventId, now) {
+  var normalized = echoPhase17NormalizeMagicUpdate_(event);
+  if (!normalized.provided) return normalized;
+
+  var update = normalized.update || {};
+  if (update.stage !== undefined) {
+    updateStateKey_('player.resonance_stage', update.stage, 'text', 'magic progression', eventId, now);
+  }
+  if (update.mastery_profile !== undefined) {
+    updateStateKey_('player.echo_mastery_profile', update.mastery_profile, 'json', 'magic progression', eventId, now);
+  }
+  if (update.rune_glow_color !== undefined) {
+    updateStateKey_('player.rune_glow_color', update.rune_glow_color, 'text', 'magic progression', eventId, now);
+  }
+  if (update.paths !== undefined) {
+    updateStateKey_('player.echo_paths', update.paths, 'json', 'magic progression', eventId, now);
+  }
+  if (update.abilities !== undefined) {
+    updateStateKey_('player.echo_abilities', update.abilities, 'json', 'magic progression', eventId, now);
+  }
+  if (update.effects !== undefined) {
+    updateStateKey_('player.echo_effects', update.effects, 'json', 'magic progression', eventId, now);
+  }
+  if (update.risk !== undefined) {
+    updateStateKey_('player.echo_risk', update.risk, 'json', 'magic progression', eventId, now);
+  }
+  if (update.known_facts !== undefined) {
+    updateStateKey_('player.known_facts', update.known_facts, 'json', 'magic progression', eventId, now);
+  }
+  return normalized;
+}
+
+function echoPhase17BuildMagicProjection_(state, preferenceContext) {
+  state = state || {};
+  preferenceContext = preferenceContext || {};
+  var profile = echoPhase17ParseObject_(stateValue_(state, 'player.echo_mastery_profile'));
+  var stage = echoPhase17String_(
+    stateValue_(state, 'player.resonance_stage') ||
+    profile.stage ||
+    profile.resonance_stage
+  );
+  var stageLabel = echoPhase17String_(
+    profile.label ||
+    profile.stage_label ||
+    stage
+  );
+  var masteryKnown = !!(
+    Object.keys(profile).length &&
+    (profile.percent !== undefined || profile.mastery !== undefined ||
+      profile.value !== undefined || stage)
+  );
+  var glow = echoPhase17String_(
+    stateValue_(state, 'player.rune_glow_color') ||
+    stateValue_(state, 'player_rune_glow_color') ||
+    profile.rune_glow_color ||
+    profile.glow_color
+  );
+  var paths = echoPhase17List_(
+    stateValue_(state, 'player.echo_paths') || profile.paths || profile.path
+  );
+  var abilities = echoPhase17List_(
+    stateValue_(state, 'player.echo_abilities') || profile.abilities
+  );
+  var effects = echoPhase17List_(
+    stateValue_(state, 'player.echo_effects') || profile.effects
+  );
+  var risk = echoPhase17ParseObject_(
+    stateValue_(state, 'player.echo_risk') || profile.risk
+  );
+  var groupMagic = (preferenceContext.group || {}).magic || {};
+  var restoration = groupMagic.restoration_model || {};
+  var training = groupMagic.training_model || {};
+  var progression = groupMagic.progression_model || {};
+
+  return {
+    version: ECHO_PHASE17_MAGIC_VERSION,
+    source: 'STATE_SNAPSHOT',
+    available: masteryKnown || !!stage || !!glow || paths.length > 0 || abilities.length > 0,
+    current: {
+      stage: stage || null,
+      stageLabel: stageLabel || null,
+      mastery: {
+        status: masteryKnown ? 'established' : 'unknown',
+        label: stageLabel || null,
+        exactNumberHidden: true,
+        percent: null
+      },
+      runeGlowColor: glow || null,
+      paths: paths,
+      abilities: abilities,
+      effects: effects,
+      risk: Object.keys(risk).length ? risk : null
+    },
+    planned: {
+      restoration: {
+        enabled: restoration.dominant_women_amplify_lost_magic === true,
+        status: restoration.planned_discovery_not_current_fact
+          ? 'PLANNED_NOT_CURRENT_FACT'
+          : 'PREFERENCE_DIRECTION',
+        source: 'ECHO_PREFERENCE_PROFILE',
+        releaseTriggers: echoPhase17List_(restoration.release_triggers),
+        paths: echoPhase17List_(restoration.paths),
+        playerMotivation: restoration.player_motivation || null
+      },
+      training: {
+        source: 'ECHO_PREFERENCE_PROFILE',
+        firstExpertRole: training.first_expert_role || null,
+        skills: echoPhase17List_(training.skills),
+        methods: echoPhase17List_(training.methods),
+        interwovenWithPowerDynamic: training.magic_and_power_dynamic_interwoven === true
+      },
+      progression: {
+        source: 'ECHO_PREFERENCE_PROFILE',
+        ordinaryCloseness: progression.ordinary_closeness || null,
+        majorRituals: progression.major_solo_or_group_rituals || null,
+        risks: echoPhase17List_(progression.risks),
+        lastingTracesPossible: progression.lasting_dark_traces_possible === true
+      }
+    },
+    invariants: {
+      numericValuesAreStateBacked: true,
+      preferenceDoesNotCreateCurrentMagic: true,
+      relationshipsDoNotAutoIncrementMagic: true,
+      unknownRiskRemainsUnknown: true
+    }
+  };
+}
 // ===== Read-only overlay projection =====
 
 // ECHO read-only overlay state projection.
@@ -2785,6 +3177,7 @@ function overlaySceneDeliveryPayload_(scene) {
     contentRating: scene.content_rating || '',
     intimacyMode: scene.intimacy_mode || '',
     intimacyGuard: echoPhase16NormalizeIntimacy_(scene, { legacyRead: true }),
+    magicDelta: echoPhase17NormalizeMagicUpdate_(scene, { legacyRead: true }),
     availableActions: actionsFromScene_(scene.available_actions_json),
     sceneContractVersion: scene.scene_contract_version || ECHO_SCENE_CONTRACT_VERSION,
     resolutionContractVersion: ECHO_RESOLUTION_CONTRACT_VERSION,
@@ -3656,6 +4049,7 @@ function getOverlayState_() {
   var itemOwnership = itemOwnershipProjection_(state, overlayWarnings);
   var echoMastery = echoMasteryValue_(stateValue_(state, 'player.echo_mastery_profile'));
   var memoryState = localizeMemory_(stateValue_(state, 'player.memory_state') || 'NO_MEMORY');
+  var magicProjection = echoPhase17BuildMagicProjection_(state, preferenceContext);
   var currentLocation = locationLabel_(locationId);
 
   var currentScene = overlaySceneDeliveryPayload_(scene);
@@ -3738,6 +4132,8 @@ function getOverlayState_() {
     relationshipContract: echoRelationshipDirectoryContract_(),
     groupContract: echoGroupMembershipContract_(),
     intimacyContract: echoIntimacyContract_(),
+    magicContract: echoPhase17MagicContract_(),
+    magicProjection: magicProjection,
     relationshipProfiles: preferenceContext.characters
       .filter(function (profile) {
         return !isTechnicalRelationshipPlaceholder_({ entity_b: profile.entityId });
@@ -6648,7 +7044,7 @@ var ECHO_PHASE2_SCHEMA_ = {
     'player_action', 'narrative_summary', 'state_changes_json', 'new_flags',
     'affected_entities', 'canonicality', 'source', 'reversible', 'notes',
     'content_rating', 'intimacy_mode', 'intimacy_guard_json',
-    'resolution_json', 'resolution_mode', 'resolution_outcome', 'turn_id',
+    'magic_update_json', 'resolution_json', 'resolution_mode', 'resolution_outcome', 'turn_id',
     'transaction_id', 'revision_id', 'committed_at', 'payload_fingerprint'
   ],
   SCENE_FEED: [
@@ -6657,7 +7053,7 @@ var ECHO_PHASE2_SCHEMA_ = {
     'scene_contract_version', 'resolution_json', 'mood',
     'visible_changes_json', 'available_actions_json', 'portraits_json',
     'map_delta_json', 'relationship_delta_json', 'status', 'content_rating',
-    'intimacy_mode', 'intimacy_guard_json', 'scene_id', 'revision_id',
+    'intimacy_mode', 'intimacy_guard_json', 'magic_delta_json', 'scene_id', 'revision_id',
     'revision_number', 'supersedes_feed_id', 'is_current', 'transaction_id',
     'created_at'
   ],
@@ -6964,7 +7360,8 @@ function getEchoAuthoritativeContext_(options) {
       world_projection: projections.world,
       character_projections: projections.characters,
       relationship_projections: projections.relationships,
-      group_projections: projections.groups
+      group_projections: projections.groups,
+      magic_projection: echoPhase17BuildMagicProjection_(state, preferenceContext)
     },
     narrative: {
       current_scene: echoPhase2StripRow_(currentScene),
@@ -6996,6 +7393,7 @@ function getEchoAuthoritativeContext_(options) {
     },
     projection_contract: echoProjectionContract_(),
     preference_projection_contract: echoPreferenceProjectionContract_(),
+    magic_contract: echoPhase17MagicContract_(),
     validation_contract: echoValidationReportContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_(),
@@ -7279,6 +7677,7 @@ function echoPhase2AppendSceneRevision_(event, options) {
     content_rating: scene.content_rating || event.content_rating || '',
     intimacy_mode: echoPhase16EventMode_(event),
     intimacy_guard_json: jsonString_(echoPhase16NormalizeIntimacy_(event)),
+    magic_delta_json: jsonString_(echoPhase17NormalizeMagicUpdate_(event)),
     resolution_json: jsonString_(resolution),
     scene_id: sceneId || feedId,
     revision_id: revisionId,
@@ -7629,6 +8028,7 @@ function validatePhase2EventUpdates_(event) {
   ).forEach(function (patch) {
     echoPhase2NormalizeGroupPatch_(patch, patch && patch.member_id);
   });
+  echoPhase17ValidateMagicUpdates_(event);
 }
 
 function echoPhase2ApplyGroupMemberUpdates_(event, eventId, now) {
@@ -7675,6 +8075,7 @@ function echoPhase2CommitPlan_(event, options) {
   options = options || {};
   validateEventShape_(event);
   validatePhase2EventUpdates_(event);
+  echoPhase17ValidateMagicUpdates_(event);
 
   var context = getEchoAuthoritativeContext_({ includePrivate: false });
   var existingTransaction = echoPhase2TransactionForEvent_(event.event_id);
@@ -7727,6 +8128,7 @@ function echoPhase2CommitPlan_(event, options) {
           content_rating: event.content_rating || '',
           intimacy_mode: echoPhase16EventMode_(event),
           intimacy_guard_json: jsonString_(echoPhase16NormalizeIntimacy_(event)),
+          magic_update_json: jsonString_(echoPhase17NormalizeMagicUpdate_(event)),
           resolution_json: jsonString_(resolution),
           resolution_mode: resolution.mode || '',
           resolution_outcome: resolution.outcome || '',
@@ -7764,6 +8166,7 @@ function echoPhase2CommitPlan_(event, options) {
 
     if (!transaction.state_applied_at) {
       applyStateUpdates_(event.state_updates || {}, event.event_id, new Date());
+      echoPhase17ApplyMagicUpdates_(event, event.event_id, new Date());
       echoPhase2TransactionStage_(transaction, 'state_applied');
     }
 
