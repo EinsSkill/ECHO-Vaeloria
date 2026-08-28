@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-17-magic-progression-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-18-overlay-display-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -54,6 +54,7 @@ var ECHO_PHASE16_INTIMACY_VERSION = '1.0.0';
 var ECHO_PHASE16_INTIMACY_CONTRACT_VERSION = '1.0.0';
 var ECHO_PHASE17_MAGIC_VERSION = '1.0.0';
 var ECHO_PHASE17_MAGIC_CONTRACT_VERSION = '1.0.0';
+var ECHO_PHASE18_OVERLAY_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -201,6 +202,9 @@ function doGet(e) {
   }
   if (action === 'magic-contract') {
     return jsonOutput_(echoGetMagicContract());
+  }
+  if (action === 'overlay-display-contract') {
+    return jsonOutput_(echoGetOverlayDisplayContract());
   }
   if (action === 'context-binding-contract') {
     return jsonOutput_(echoGetContextBindingContract());
@@ -1800,10 +1804,16 @@ function echoOverlayContract_() {
         'feedId', 'eventId', 'sceneId', 'revisionId', 'revisionNumber',
         'title', 'narrativeText', 'formattedText', 'text', 'blocks',
         'dialoguePresentation', 'resolution', 'sceneType', 'status', 'locationId',
-        'sceneContractVersion', 'resolutionContractVersion', 'intimacyGuard', 'magicDelta'
+        'sceneContractVersion', 'resolutionContractVersion', 'intimacyGuard', 'magicDelta', 'locationLabelSource'
       ],
       blocks_source: 'SCENE_FEED.scene_blocks_json',
       rendering_rule: 'Render visible blocks in order; apply blocks[].cssClass/presentation. Use formattedText/text only as a legacy fallback.',
+      display_safety: {
+        hide_technical_ids: true,
+        missing_relationship_label: 'Unbekannte Bindung',
+        missing_location_label: 'Unbekannter Ort',
+        relationship_source_fields: ['name', 'role', 'stats', 'safety', 'intimacy']
+      },
       dialogue_presentation: {
         block_type: 'dialogue',
         style_key: 'dialogue-gold',
@@ -3134,6 +3144,54 @@ function echoPhase17BuildMagicProjection_(state, preferenceContext) {
     }
   };
 }
+
+/* ===== Phase 18: defensive overlay display projection ===== */
+
+// Display labels are presentation data. Prefer labels from the workbook and
+// retain canonical IDs only in machine-readable fields. The fallback labels
+// below are deliberately generic and never expose a technical identifier.
+
+function echoPhase18DisplayContract_() {
+  return {
+    version: ECHO_PHASE18_OVERLAY_VERSION,
+    phase: 18,
+    source_of_truth: 'ECHO_WORKBOOK',
+    label_precedence: [
+      'STATE_SNAPSHOT player.location_label/player.location_name',
+      'SCENE_FEED location_label/location_name',
+      'technical fallback label'
+    ],
+    technical_id_policy: 'Canonical IDs remain available to the API but are never used as a visible label when no readable label exists.',
+    relationship_policy: 'One deduplicated visible card per canonical entity; technical placeholders are hidden.',
+    magic_policy: 'Use magicProjection.current for status, stage and known rune color; do not display a synthetic percentage.',
+    scene_policy: 'Only blocks with type dialogue receive dialogue styling; prose, action and sensory blocks remain unhighlighted.'
+  };
+}
+
+function echoGetOverlayDisplayContract() {
+  return {
+    ok: true,
+    contract: echoPhase18DisplayContract_()
+  };
+}
+
+function echoPhase18LocationProjection_(state, scene, locationId) {
+  state = state || {};
+  scene = scene || {};
+  var candidates = [
+    stateValue_(state, 'player.location_label'),
+    stateValue_(state, 'player.location_name'),
+    scene.location_label,
+    scene.location_name
+  ];
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = String(candidates[i] || '').trim();
+    if (candidate && candidate !== String(locationId || '').trim()) {
+      return { label: candidate, source: 'ECHO_WORKBOOK' };
+    }
+  }
+  return { label: locationLabel_(locationId), source: 'TECHNICAL_FALLBACK' };
+}
 // ===== Read-only overlay projection =====
 
 // ECHO read-only overlay state projection.
@@ -3178,6 +3236,7 @@ function overlaySceneDeliveryPayload_(scene) {
     intimacyMode: scene.intimacy_mode || '',
     intimacyGuard: echoPhase16NormalizeIntimacy_(scene, { legacyRead: true }),
     magicDelta: echoPhase17NormalizeMagicUpdate_(scene, { legacyRead: true }),
+    locationLabelSource: scene.location_label_source || '',
     availableActions: actionsFromScene_(scene.available_actions_json),
     sceneContractVersion: scene.scene_contract_version || ECHO_SCENE_CONTRACT_VERSION,
     resolutionContractVersion: ECHO_RESOLUTION_CONTRACT_VERSION,
@@ -4050,7 +4109,8 @@ function getOverlayState_() {
   var echoMastery = echoMasteryValue_(stateValue_(state, 'player.echo_mastery_profile'));
   var memoryState = localizeMemory_(stateValue_(state, 'player.memory_state') || 'NO_MEMORY');
   var magicProjection = echoPhase17BuildMagicProjection_(state, preferenceContext);
-  var currentLocation = locationLabel_(locationId);
+  var locationProjection = echoPhase18LocationProjection_(state, scene, locationId);
+  var currentLocation = locationProjection.label;
 
   var currentScene = overlaySceneDeliveryPayload_(scene);
   currentScene.chapterLabel = chapterLabel_(state);
@@ -4064,6 +4124,7 @@ function getOverlayState_() {
   currentScene.location = currentLocation;
   currentScene.locationLabel = currentLocation;
   currentScene.locationId = locationId;
+  currentScene.locationLabelSource = locationProjection.source;
 
   var conditionNames = conditions.map(conditionName_).filter(function (name) { return !!name; });
   var currentHealth = health === '' ? null : Number(health);
@@ -4086,12 +4147,14 @@ function getOverlayState_() {
     location: currentLocation,
     locationLabel: currentLocation,
     locationId: locationId,
+    locationLabelSource: locationProjection.source,
     player: {
       name: stateValue_(state, 'player.name') || 'Namenlos',
       location: currentLocation,
       locationLabel: currentLocation,
       locationName: currentLocation,
       locationId: locationId,
+      locationLabelSource: locationProjection.source,
       species: stateValue_(state, 'player.species') || 'unbekannt',
       tags: playerTags_(state, echoMastery),
       health: currentHealth,
@@ -4111,6 +4174,7 @@ function getOverlayState_() {
       locationLabel: currentLocation,
       locationName: currentLocation,
       locationId: locationId,
+      locationLabelSource: locationProjection.source,
       condition: currentHealth === null
         ? 'unbestimmt'
         : (currentHealth <= 0 ? 'bewusstlos' : (conditionNames.length ? conditionNames.join(' · ') : 'lebensfähig')),
@@ -4370,7 +4434,7 @@ function relationshipToOverlay_(row, profile) {
   return {
     id: row.state_id || profile.entityId || row.entity_b || 'UNKNOWN_RELATIONSHIP',
     entityId: String(profile.entityId || row.entity_b || ''),
-    name: row.display_name || profile.displayName || row.entity_b || 'Unbekannte Bindung',
+    name: row.display_name || profile.displayName || 'Unbekannte Bindung',
     role: displayRole,
     baseRole: role,
     note: [relationshipNote_(row, profile), summary].filter(function (value) {
@@ -4657,7 +4721,7 @@ function mapRegions_(state, locationId) {
   }).map(function (region) {
     return {
       id: region.id,
-      name: region.name || region.id,
+      name: region.name || 'Unbekannte Region',
       state: region.state || 'known',
       x: Number(region.x) || 50,
       y: Number(region.y) || 50,
@@ -4676,7 +4740,7 @@ function locationLabel_(id) {
     ASHFEN: 'Aschfenn',
     GRAUKUESTE: 'Graue Küste',
     RUINENWALD: 'Ruinenwald'
-  }[id] || id || 'Unbekannter Ort';
+  }[id] || 'Unbekannter Ort';
 }
 
 function mapRegionIdForLocation_(locationId) {
