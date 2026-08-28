@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-8-latency-and-dialogue-presentation-2026-08-28';
+var ECHO_BUILD_ID = 'phase-8-latency-and-dialogue-presentation-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -185,8 +185,9 @@ function doGet(e) {
     return jsonOutput_(echoValidatePreferenceProfile());
   }
   if (action === 'state') {
-    // State reads are side-effect free. The processor is driven by its trigger
-    // or an explicit write path, never by an overlay GET request.
+    // Keep the payload read-only. A lightweight wake check only schedules the
+    // processor when the newest inbox row is still waiting.
+    scheduleTurnProcessorWakeFromState_();
     return jsonOutput_(getOverlayState_());
   }
   if (action === 'diagnostics') {
@@ -250,11 +251,50 @@ function getOverlayStateForClient() {
 }
 
 var ECHO_PROCESSOR_WAKE_DELAY_MS_ = 1000;
+var ECHO_INLINE_PROCESSING_ENABLED_ = true;
+var ECHO_PROCESSOR_WAKE_CACHE_KEY_ = 'ECHO_PROCESSOR_WAKE_SCHEDULED_V2';
+var ECHO_PROCESSOR_WAKE_CACHE_TTL_SECONDS_ = 300;
+var ECHO_PROCESSOR_MAX_ROWS_PER_RUN_ = 1;
+
+function markTurnProcessorWake_() {
+  try {
+    CacheService.getScriptCache().put(
+      ECHO_PROCESSOR_WAKE_CACHE_KEY_,
+      '1',
+      ECHO_PROCESSOR_WAKE_CACHE_TTL_SECONDS_
+    );
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function clearTurnProcessorWakeMarker_() {
+  try {
+    CacheService.getScriptCache().remove(ECHO_PROCESSOR_WAKE_CACHE_KEY_);
+  } catch (error) {
+    // Cache is only an anti-duplication guard; processing must continue.
+  }
+}
 
 // Ask Apps Script to wake the processor shortly after a new turn is written.
 // The recurring trigger remains the safe fallback when one-shot trigger creation
-// is unavailable or the platform delays the wake.
+// is unavailable or the platform delays the wake. Cache throttling prevents an
+// open overlay from creating a trigger every few seconds.
 function scheduleTurnProcessorWake_() {
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    if (cache.get(ECHO_PROCESSOR_WAKE_CACHE_KEY_) === '1') return true;
+    cache.put(
+      ECHO_PROCESSOR_WAKE_CACHE_KEY_,
+      '1',
+      ECHO_PROCESSOR_WAKE_CACHE_TTL_SECONDS_
+    );
+  } catch (error) {
+    cache = null;
+  }
+
   try {
     ScriptApp.newTrigger('processTurnInbox')
       .timeBased()
@@ -262,7 +302,53 @@ function scheduleTurnProcessorWake_() {
       .create();
     return true;
   } catch (error) {
+    if (cache) {
+      try {
+        cache.remove(ECHO_PROCESSOR_WAKE_CACHE_KEY_);
+      } catch (cacheError) {}
+    }
     return false;
+  }
+}
+
+function scheduleTurnProcessorWakeFromState_() {
+  try {
+    var sheet = echoFastRequireSheet_(echoFastSpreadsheet_(), ECHO_CONFIG.sheets.turnInbox);
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return false;
+
+    var lastColumn = sheet.getLastColumn();
+    var headers = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0].map(function (value) {
+      return String(value || '').trim();
+    });
+    var statusIndex = headers.indexOf('validation_status');
+    if (statusIndex === -1) return false;
+
+    var values = sheet.getRange(lastRow, 1, 1, lastColumn).getValues()[0];
+    var status = String(values[statusIndex] || '').trim().toUpperCase();
+    if (['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(status) === -1) return false;
+    return scheduleTurnProcessorWake_();
+  } catch (error) {
+    return false;
+  }
+}
+
+function processTurnInline_(turnId) {
+  var id = String(turnId || '').trim();
+  if (!id) throw new Error('turn_id is required for inline processing.');
+
+  markTurnProcessorWake_();
+  try {
+    var processor = processTurnInbox_({ turnId: id, maxRows: 1 });
+    var inbox = echoFastRequireSheet_(echoFastSpreadsheet_(), ECHO_CONFIG.sheets.turnInbox);
+    var row = echoFastFindTurnRow_(inbox, id);
+    var turn = row ? echoFastReadInboxRow_(inbox, row) : null;
+    return {
+      processor: processor,
+      turn: turn
+    };
+  } finally {
+    clearTurnProcessorWakeMarker_();
   }
 }
 
@@ -449,6 +535,10 @@ function enqueueTurn_(event) {
 
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
+  var response = null;
+  var shouldProcessInline = false;
+  var turnId = '';
+
   try {
     var inbox = getSheet_(ECHO_CONFIG.sheets.turnInbox);
     var eventLog = getSheet_(ECHO_CONFIG.sheets.eventLog);
@@ -466,50 +556,71 @@ function enqueueTurn_(event) {
 
     var existingInbox = findInboxEvent_(inbox, event.event_id);
     if (existingInbox) {
-      return {
+      var existingStatus = String(existingInbox.validation_status || 'PENDING').toUpperCase();
+      response = {
         ok: true,
         queued: true,
         duplicate: true,
-        validation_status: String(existingInbox.validation_status || 'PENDING').toUpperCase(),
+        validation_status: existingStatus,
         turn_id: existingInbox.turn_id,
         event_id: event.event_id,
         ui_feed_id: existingInbox.ui_feed_id || ''
       };
+      shouldProcessInline = ['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(existingStatus) !== -1;
+      turnId = existingInbox.turn_id;
+    } else {
+      var now = new Date();
+      turnId = event.turn_id || ('TURN-' + event.event_id);
+      appendObject_(inbox, {
+        turn_id: turnId,
+        chat_id: event.chat_id || 'ECHO-PROJECT',
+        received_at: now,
+        raw_input: event.raw_input || event.player_action,
+        parsed_intent_json: jsonString_(event),
+        validation_status: 'PENDING',
+        commit_event_id: '',
+        ui_feed_id: '',
+        error_code: '',
+        processed_at: '',
+        context_fingerprint: event.context_fingerprint || '',
+        context_read_at: event.context_read_at || ''
+      });
+
+      response = {
+        ok: true,
+        queued: true,
+        duplicate: false,
+        validation_status: 'PENDING',
+        turn_id: turnId,
+        event_id: event.event_id,
+        contract_version: ECHO_CONTRACT_VERSION
+      };
+      shouldProcessInline = true;
     }
-
-    var now = new Date();
-    var turnId = event.turn_id || ('TURN-' + event.event_id);
-    appendObject_(inbox, {
-      turn_id: turnId,
-      chat_id: event.chat_id || 'ECHO-PROJECT',
-      received_at: now,
-      raw_input: event.raw_input || event.player_action,
-      parsed_intent_json: jsonString_(event),
-      validation_status: 'PENDING',
-      commit_event_id: '',
-      ui_feed_id: '',
-      error_code: '',
-      processed_at: '',
-      context_fingerprint: event.context_fingerprint || '',
-      context_read_at: event.context_read_at || ''
-    });
-
-    scheduleTurnProcessorWake_();
-
-    return {
-      ok: true,
-      queued: true,
-      duplicate: false,
-      validation_status: 'PENDING',
-      turn_id: turnId,
-      event_id: event.event_id,
-      contract_version: ECHO_CONTRACT_VERSION
-    };
   } finally {
     lock.releaseLock();
   }
-}
 
+  if (shouldProcessInline && ECHO_INLINE_PROCESSING_ENABLED_) {
+    try {
+      var inline = processTurnInline_(turnId);
+      var inlineTurn = inline && inline.turn;
+      if (inlineTurn) {
+        response.validation_status = inlineTurn.validation_status;
+        response.ui_feed_id = inlineTurn.ui_feed_id || '';
+        response.ok = inlineTurn.validation_status !== 'ERROR';
+      } else {
+        scheduleTurnProcessorWake_();
+      }
+    } catch (error) {
+      scheduleTurnProcessorWake_();
+    }
+  } else if (shouldProcessInline) {
+    scheduleTurnProcessorWake_();
+  }
+
+  return response;
+}
 function findInboxEvent_(sheet, eventId) {
   var rows = readTable_(sheet).rows;
   for (var i = 0; i < rows.length; i++) {
@@ -1624,7 +1735,14 @@ function commitSceneCorrection_(event) {
   }
 }
 
-function processTurnInbox_() {
+function processTurnInbox_(options) {
+  options = options || {};
+  var targetTurnId = String(options.turnId || '').trim();
+  var maxRows = options.maxRows === undefined
+    ? ECHO_PROCESSOR_MAX_ROWS_PER_RUN_
+    : Number(options.maxRows);
+  if (!isFinite(maxRows) || maxRows < 1) maxRows = 1;
+
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
 
@@ -1638,8 +1756,11 @@ function processTurnInbox_() {
 
     var processed = 0;
     var recovered = 0;
+    var candidateCount = 0;
 
     table.rows.forEach(function (row) {
+      if (targetTurnId && String(row.turn_id || '').trim() !== targetTurnId) return;
+
       var status = String(row.validation_status || '').toUpperCase();
       var processingAge = stateTimestamp_(row.locked_at || row.processed_at || row.received_at);
       var staleProcessing = status === 'PROCESSING' &&
@@ -1659,6 +1780,8 @@ function processTurnInbox_() {
       if (['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(status) === -1 && !retryableCorrection) {
         return;
       }
+      if (candidateCount >= maxRows) return;
+      candidateCount += 1;
 
       var eventIdForRecovery = String(row.commit_event_id || '').trim();
       var attempt = Number(row.attempt_count || 0) + 1;
@@ -1734,6 +1857,7 @@ function processTurnInbox_() {
 
     return { processed: processed, recovered: recovered };
   } finally {
+    clearTurnProcessorWakeMarker_();
     lock.releaseLock();
   }
 }
@@ -3450,7 +3574,7 @@ function echoGetDiagnostics_() {
 // Public, secret-free reference implementation.
 // Live spreadsheet IDs, deployment URLs and tokens belong in Script Properties.
 
-const ECHO_FAST_GATEWAY_VERSION = '1.3.0';
+const ECHO_FAST_GATEWAY_VERSION = '1.4.0';
 
 const ECHO_FAST_DEFAULT_RUNTIME_KEYS = [
   'save.last_event_id',
@@ -3549,6 +3673,9 @@ function echoSubmitTurn(turn) {
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
 
+  var response = null;
+  var shouldProcessInline = false;
+
   try {
     const ss = echoFastSpreadsheet_();
     const inbox = echoFastRequireSheet_(ss, 'TURN_INBOX');
@@ -3557,7 +3684,7 @@ function echoSubmitTurn(turn) {
     const existingRow = echoFastFindTurnRow_(inbox, normalized.turn_id);
     if (existingRow) {
       const existing = echoFastReadInboxRow_(inbox, existingRow);
-      return {
+      response = {
         ok: existing.validation_status !== 'ERROR',
         accepted: true,
         duplicate: true,
@@ -3566,84 +3693,103 @@ function echoSubmitTurn(turn) {
         delivery: echoTurnDelivery_(existing),
         chat_delivery: echoChatDeliveryPolicy_()
       };
-    }
+      shouldProcessInline = ['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(existing.validation_status) !== -1;
+    } else {
+      // ECHO sequencing rule: never create a dependent turn until the latest
+      // inbox entry has been committed successfully.
+      const latest = echoFastReadLatestInboxRow_(inbox);
+      if (latest && latest.validation_status !== 'COMMITTED') {
+        let code = 'PREVIOUS_TURN_NOT_COMMITTED';
+        if (latest.validation_status === 'PENDING') code = 'PREVIOUS_TURN_PENDING';
+        if (latest.validation_status === 'ERROR') code = 'PREVIOUS_TURN_ERROR';
 
-    // ECHO sequencing rule: never create a dependent turn until the latest
-    // inbox entry has been committed successfully.
-    const latest = echoFastReadLatestInboxRow_(inbox);
-    if (latest && latest.validation_status !== 'COMMITTED') {
-      let code = 'PREVIOUS_TURN_NOT_COMMITTED';
-      if (latest.validation_status === 'PENDING') code = 'PREVIOUS_TURN_PENDING';
-      if (latest.validation_status === 'ERROR') code = 'PREVIOUS_TURN_ERROR';
+        return {
+          ok: false,
+          accepted: false,
+          duplicate: false,
+          error: code,
+          last_turn: latest,
+          delivery: echoTurnDelivery_(latest),
+          chat_delivery: echoChatDeliveryPolicy_()
+        };
+      }
 
-      return {
-        ok: false,
-        accepted: false,
+      const lastRow = inbox.getLastRow();
+      const targetRow = Math.max(2, lastRow + 1);
+      const target = inbox.getRange(targetRow, 1, 1, 10);
+
+      // Preserve only formatting. Never copy stale commit fields from G:J.
+      if (lastRow >= 2) {
+        inbox
+          .getRange(lastRow, 1, 1, 10)
+          .copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+      }
+
+      target.setValues([[
+        normalized.turn_id,
+        normalized.chat_id,
+        normalized.received_at,
+        normalized.raw_input,
+        normalized.parsed_intent_json,
+        'PENDING',
+        '',
+        '',
+        '',
+        ''
+      ]]);
+
+      SpreadsheetApp.flush();
+      if (normalized.context_fingerprint) {
+        setCellByHeader_(inbox, targetRow, 'context_fingerprint', normalized.context_fingerprint);
+      }
+      if (normalized.context_read_at) {
+        setCellByHeader_(inbox, targetRow, 'context_read_at', normalized.context_read_at);
+      }
+
+      // Processor may already have changed PENDING to COMMITTED/ERROR.
+      const written = echoFastReadInboxRow_(inbox, targetRow);
+      const acceptedStatuses = ['PENDING', 'COMMITTED', 'ERROR'];
+      const verified =
+        written.turn_id === normalized.turn_id &&
+        acceptedStatuses.indexOf(written.validation_status) !== -1;
+
+      if (!verified) throw new Error('TURN_INBOX verification failed after write.');
+
+      response = {
+        ok: written.validation_status !== 'ERROR',
+        accepted: true,
         duplicate: false,
-        error: code,
-        last_turn: latest,
-        delivery: echoTurnDelivery_(latest),
+        row: targetRow,
+        turn: written,
+        delivery: echoTurnDelivery_(written),
         chat_delivery: echoChatDeliveryPolicy_()
       };
+      shouldProcessInline = written.validation_status === 'PENDING';
     }
-
-    const lastRow = inbox.getLastRow();
-    const targetRow = Math.max(2, lastRow + 1);
-    const target = inbox.getRange(targetRow, 1, 1, 10);
-
-    // Preserve only formatting. Never copy stale commit fields from G:J.
-    if (lastRow >= 2) {
-      inbox
-        .getRange(lastRow, 1, 1, 10)
-        .copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
-    }
-
-    target.setValues([[
-      normalized.turn_id,
-      normalized.chat_id,
-      normalized.received_at,
-      normalized.raw_input,
-      normalized.parsed_intent_json,
-      'PENDING',
-      '',
-      '',
-      '',
-      ''
-    ]]);
-
-    SpreadsheetApp.flush();
-    if (normalized.context_fingerprint) {
-      setCellByHeader_(inbox, targetRow, 'context_fingerprint', normalized.context_fingerprint);
-    }
-    if (normalized.context_read_at) {
-      setCellByHeader_(inbox, targetRow, 'context_read_at', normalized.context_read_at);
-    }
-
-    // Processor may already have changed PENDING to COMMITTED/ERROR.
-    const written = echoFastReadInboxRow_(inbox, targetRow);
-    const acceptedStatuses = ['PENDING', 'COMMITTED', 'ERROR'];
-    const verified =
-      written.turn_id === normalized.turn_id &&
-      acceptedStatuses.indexOf(written.validation_status) !== -1;
-
-    if (!verified) throw new Error('TURN_INBOX verification failed after write.');
-
-    scheduleTurnProcessorWake_();
-
-    return {
-      ok: written.validation_status !== 'ERROR',
-      accepted: true,
-      duplicate: false,
-      row: targetRow,
-      turn: written,
-      delivery: echoTurnDelivery_(written),
-      chat_delivery: echoChatDeliveryPolicy_()
-    };
   } finally {
     lock.releaseLock();
   }
-}
 
+  if (shouldProcessInline && ECHO_INLINE_PROCESSING_ENABLED_) {
+    try {
+      var inline = processTurnInline_(normalized.turn_id);
+      var inlineTurn = inline && inline.turn;
+      if (inlineTurn) {
+        response.turn = inlineTurn;
+        response.delivery = echoTurnDelivery_(inlineTurn);
+        response.ok = inlineTurn.validation_status !== 'ERROR';
+      } else {
+        scheduleTurnProcessorWake_();
+      }
+    } catch (error) {
+      scheduleTurnProcessorWake_();
+    }
+  } else if (shouldProcessInline) {
+    scheduleTurnProcessorWake_();
+  }
+
+  return response;
+}
 /** Targeted status read for an already-submitted turn. */
 function echoGetTurnStatus(turnId) {
   const id = echoFastRequiredString_(turnId, 'turn_id');
