@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-8-latency-and-dialogue-presentation-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-9-canonical-projection-health-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -41,6 +41,7 @@ var ECHO_CONTEXT_BINDING_VERSION = '1.0.0';
 var ECHO_SCENE_READBACK_CONTRACT_VERSION = '1.0.0';
 var ECHO_EVENT_IDENTITY_VERSION = '1.0.0';
 var ECHO_COMMIT_RECONCILIATION_VERSION = '1.0.0';
+var ECHO_HEALTH_REPORT_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -149,6 +150,9 @@ function doGet(e) {
   var action = e && e.parameter ? String(e.parameter.action || '') : '';
   if (action === 'health') {
     return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0', build: ECHO_BUILD_ID, state_model: ECHO_STATE_MODEL_VERSION, preference_policy: ECHO_PREFERENCE_POLICY_VERSION });
+  }
+  if (action === 'health-report') {
+    return jsonOutput_(echoGetHealthReport_());
   }
   if (action === 'delivery-policy') {
     return jsonOutput_(echoGetChatDeliveryPolicy());
@@ -770,15 +774,137 @@ function isLegacyStateKey_(key) {
   );
 }
 
-function getStateMap_() {
+var ECHO_STATE_EXCLUDED_RECORD_STATUSES_ = {
+  ARCHIVED: true,
+  SUPERSEDED: true,
+  DEPRECATED: true,
+  LEGACY: true,
+  DELTA_AUDIT: true
+};
+
+function echoStateValuesEquivalent_(left, right) {
+  if (left === right) return true;
+  if (left instanceof Date && right instanceof Date) {
+    return left.getTime() === right.getTime();
+  }
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch (error) {
+    return String(left) === String(right);
+  }
+}
+
+function echoCanonicalStateProjection_(warnings) {
   var rows = readTable_(getSheet_(ECHO_CONFIG.sheets.state)).rows;
-  var result = {};
-  rows.forEach(function (row) {
+  return echoCanonicalStateProjectionFromRows_(rows, warnings);
+}
+
+function echoCanonicalStateProjectionFromRows_(rows, warnings) {
+  warnings = warnings || [];
+  var latest = {};
+  var legacyKeys = {};
+  var excludedRows = 0;
+
+  (rows || []).forEach(function (row) {
     var rawKey = String(row.state_key || '').trim();
-    if (!rawKey || isLegacyStateKey_(rawKey)) return;
-    if (recordIsNewer_(row, result[rawKey])) result[rawKey] = row;
+    if (!rawKey) return;
+
+    if (isLegacyStateKey_(rawKey)) {
+      legacyKeys[rawKey] = true;
+      return;
+    }
+
+    var key = canonicalStateKey_(rawKey);
+    var recordStatus = String(row.record_status || '').trim().toUpperCase();
+    if (ECHO_STATE_EXCLUDED_RECORD_STATUSES_[recordStatus]) {
+      excludedRows += 1;
+      return;
+    }
+
+    var candidate = Object.assign({}, row, { state_key: key });
+    var current = latest[key];
+    var candidateWins = !current || recordIsNewer_(candidate, current);
+
+    if (current && !echoStateValuesEquivalent_(current.value, candidate.value)) {
+      warnings.push({
+        code: 'STATE_DUPLICATE_KEY',
+        state_key: key,
+        existing_row: Number(current.__rowNumber || 0),
+        candidate_row: Number(candidate.__rowNumber || 0),
+        selected_row: Number((candidateWins ? candidate : current).__rowNumber || 0),
+        message: 'Mehrere aktive Zustandszeilen für denselben Schlüssel; die neueste Zeile wird verwendet.'
+      });
+    }
+
+    if (candidateWins) latest[key] = candidate;
   });
-  return result;
+
+  var legacyKeyList = Object.keys(legacyKeys);
+  if (legacyKeyList.length) {
+    warnings.push({
+      code: 'STATE_LEGACY_ROWS_IGNORED',
+      count: legacyKeyList.length,
+      keys: legacyKeyList.slice(0, 30),
+      message: 'Legacy-Zustandsaliasse werden aus dem Laufzeitkontext ausgeschlossen.'
+    });
+  }
+  if (excludedRows) {
+    warnings.push({
+      code: 'STATE_NON_CURRENT_ROWS_IGNORED',
+      count: excludedRows,
+      message: 'Archivierte, supersedierte oder Audit-Delta-Zeilen werden nicht als aktueller Zustand verwendet.'
+    });
+  }
+
+  // A player-held item is only effective when the item projection confirms
+  // PLAYER ownership. This prevents a stale state row from moving an item
+  // that is currently held by an NPC into the player context.
+  var heldRow = latest['player.held_item'];
+  if (heldRow) {
+    var itemProjection = { available: false, hasRows: false, playerHeldItem: '' };
+    try {
+      itemProjection = echoPhase2ItemProjection_([]);
+    } catch (error) {
+      // ITEM_STATE is optional during the initial migration; inventory is the
+      // compatibility fallback in that case.
+    }
+
+    var heldItemId = normalizedItemIdentity_(heldRow.value);
+    var playerActuallyHolds = false;
+    if (itemProjection.available && itemProjection.hasRows) {
+      playerActuallyHolds = String(itemProjection.playerHeldItem || '') === heldItemId;
+    } else {
+      var inventoryRow = latest['player.inventory'];
+      var inventory = parseList_(inventoryRow ? inventoryRow.value : '', []);
+      playerActuallyHolds = inventoryContainsItem_(inventory, heldItemId);
+    }
+
+    if (!playerActuallyHolds) {
+      delete latest['player.held_item'];
+      warnings.push({
+        code: 'STATE_STALE_PLAYER_HELD_ITEM_IGNORED',
+        item_id: heldItemId,
+        row: Number(heldRow.__rowNumber || 0),
+        message: 'player.held_item wurde verworfen, weil die aktuelle Besitzprojektion keinen Spielerbesitz bestätigt.'
+      });
+    }
+  }
+
+  var effectiveRows = Object.keys(latest).map(function (key) {
+    return latest[key];
+  }).sort(function (left, right) {
+    return Number(left.__rowNumber || 0) - Number(right.__rowNumber || 0);
+  });
+
+  return {
+    map: latest,
+    rows: effectiveRows
+  };
+}
+
+// State reads are side-effect free: canonical projection never writes workbook state.
+function getStateMap_(warnings) {
+  return echoCanonicalStateProjection_(warnings).map;
 }
 
 function stateValue_(state, key) {
@@ -2849,9 +2975,36 @@ function echoPhase5AssertContextBinding_(event, options, currentContext) {
   };
 }
 
+function echoLiveDashboardProjection_(eventRows, playableScenes, relationshipRows) {
+  eventRows = Array.isArray(eventRows) ? eventRows : [];
+  playableScenes = Array.isArray(playableScenes) ? playableScenes : [];
+  relationshipRows = Array.isArray(relationshipRows) ? relationshipRows : [];
+
+  var latestEvent = eventRows
+    .filter(function (row) { return !!row.event_id; })
+    .slice()
+    .sort(sequenceAscending_);
+  var currentSequence = latestEvent.length
+    ? Number(latestEvent[latestEvent.length - 1].sequence || 0)
+    : 0;
+
+  return {
+    version: ECHO_HEALTH_REPORT_VERSION,
+    source: 'LIVE_WORKBOOK',
+    generated_at: new Date().toISOString(),
+    counts: {
+      eventLog: eventRows.filter(function (row) { return !!row.event_id; }).length,
+      playableScenes: playableScenes.length,
+      relationships: relationshipRows.length
+    },
+    currentSequence: currentSequence,
+    staleSheetDashboardValuesAreNotUsed: true
+  };
+}
+
 function getOverlayState_() {
-  var state = getStateMap_();
   var overlayWarnings = [];
+  var state = getStateMap_(overlayWarnings);
   var sceneRows = readOverlayRows_(ECHO_CONFIG.sheets.sceneFeed, overlayWarnings);
   var eventRows = readOverlayRows_(ECHO_CONFIG.sheets.eventLog, overlayWarnings);
   var relationshipRows = readOverlayRows_(ECHO_CONFIG.sheets.relationships, overlayWarnings);
@@ -2863,6 +3016,7 @@ function getOverlayState_() {
   var scene = latestBySequence_(playableScenes) || {};
   var events = eventRows.filter(function (row) { return row.event_id; }).slice().sort(sequenceAscending_);
   var latestEvent = events.length ? events[events.length - 1] : null;
+  var dashboardProjection = echoLiveDashboardProjection_(eventRows, playableScenes, relationshipRows);
   var projections = echoPhase4BuildProjections_(
     state,
     scene,
@@ -2973,7 +3127,8 @@ function getOverlayState_() {
     sceneContract: echoSceneContract_(),
     resolutionContract: echoResolutionContract_(),
     overlayContract: echoOverlayContract_(),
-    projectionContract: echoProjectionContract_()
+    projectionContract: echoProjectionContract_(),
+    dashboardProjection: dashboardProjection
   };
 }
 
@@ -3552,19 +3707,197 @@ function echoMasteryValue_(raw) {
 }
 
 
+function echoGetHealthReport_() {
+  var warnings = [];
+  var errors = [];
+  var schema = null;
+  var stateProjection = { rows: [], map: {} };
+  var eventRows = [];
+  var sceneRows = [];
+  var inboxRows = [];
+
+  try {
+    schema = echoPhase2SchemaStatus_();
+    if (!schema.ready) {
+      errors.push({
+        code: 'SCHEMA_NOT_READY',
+        message: 'Das Phase-2-Schema ist noch nicht vollständig vorhanden.'
+      });
+    }
+  } catch (error) {
+    errors.push({
+      code: 'SCHEMA_CHECK_FAILED',
+      message: String(error && error.message ? error.message : error)
+    });
+  }
+
+  try {
+    stateProjection = echoCanonicalStateProjection_(warnings);
+  } catch (error) {
+    errors.push({
+      code: 'STATE_PROJECTION_FAILED',
+      message: String(error && error.message ? error.message : error)
+    });
+  }
+
+  function readRows(sheetName) {
+    try {
+      return readTable_(getSheet_(sheetName)).rows;
+    } catch (error) {
+      errors.push({
+        code: 'SHEET_READ_FAILED',
+        sheet: sheetName,
+        message: String(error && error.message ? error.message : error)
+      });
+      return [];
+    }
+  }
+
+  eventRows = readRows(ECHO_CONFIG.sheets.eventLog).filter(function (row) {
+    return !!row.event_id;
+  });
+  sceneRows = readRows(ECHO_CONFIG.sheets.sceneFeed);
+  inboxRows = readRows(ECHO_CONFIG.sheets.turnInbox);
+
+  var playableScenes = echoPhase2EffectiveSceneRows_(
+    sceneRows.filter(isPlayableScene_)
+  );
+  var latestEventRows = eventRows.slice().sort(sequenceAscending_);
+  var latestEvent = latestEventRows.length
+    ? latestEventRows[latestEventRows.length - 1]
+    : null;
+  var latestScene = latestBySequence_(playableScenes) || null;
+  var latestInboxRows = inboxRows.slice().sort(function (left, right) {
+    var timeDiff = stateTimestamp_(left.received_at) - stateTimestamp_(right.received_at);
+    return timeDiff || (Number(left.__rowNumber || 0) - Number(right.__rowNumber || 0));
+  });
+  var latestInbox = latestInboxRows.length
+    ? latestInboxRows[latestInboxRows.length - 1]
+    : null;
+
+  var feedLinkOk = !!(
+    latestInbox &&
+    String(latestInbox.validation_status || '').toUpperCase() === 'COMMITTED' &&
+    latestInbox.commit_event_id &&
+    latestInbox.ui_feed_id &&
+    latestEvent &&
+    latestScene &&
+    String(latestInbox.commit_event_id) === String(latestEvent.event_id) &&
+    String(latestInbox.ui_feed_id) === String(latestScene.feed_id) &&
+    String(latestScene.event_id) === String(latestEvent.event_id)
+  );
+  if (!feedLinkOk) {
+    errors.push({
+      code: 'INBOX_FEED_LINK_FAILED',
+      message: 'Der letzte bestätigte Eingang, das letzte Ereignis und die aktuelle Szene sind nicht vollständig verknüpft.'
+    });
+  }
+
+  var stateLastEvent = stateProjection.map['save.last_event_id'];
+  var stateLastEventId = stateLastEvent ? String(stateLastEvent.value || '') : '';
+  var stateProjectionOk = !!(stateLastEventId && latestEvent &&
+    stateLastEventId === String(latestEvent.event_id));
+  if (!stateProjectionOk) {
+    errors.push({
+      code: 'STATE_LAST_EVENT_MISMATCH',
+      message: 'STATE_SNAPSHOT zeigt nicht auf das letzte EVENT_LOG-Ereignis.'
+    });
+  }
+
+  var latestBlocks = latestScene ? sceneBlocksForOverlay_(latestScene) : [];
+  var dialogueBlocks = latestBlocks.filter(function (block) {
+    return String(block.type || '').toLowerCase() === 'dialogue';
+  });
+  var dialoguePresentationOk = latestBlocks.every(function (block) {
+    var isDialogue = String(block.type || '').toLowerCase() === 'dialogue';
+    var presentation = block.presentation || {};
+    if (isDialogue) {
+      return presentation.key === 'dialogue-gold' &&
+        presentation.highlighted === true &&
+        presentation.cssClass === 'echo-dialogue';
+    }
+    return presentation.highlighted !== true;
+  });
+  var sceneReadbackOk = !!(
+    latestScene &&
+    String(latestScene.narrative_text || '').trim() &&
+    latestBlocks.length &&
+    String(latestScene.status || '').toUpperCase() === 'PLAY' &&
+    dialoguePresentationOk
+  );
+  if (!sceneReadbackOk) {
+    errors.push({
+      code: 'SCENE_READBACK_FAILED',
+      message: 'Die aktuelle Szene ist leer, nicht PLAY oder nicht korrekt blockbasiert lesbar.'
+    });
+  }
+
+  var seenEventIds = {};
+  var duplicateEventIds = [];
+  eventRows.forEach(function (row) {
+    var id = String(row.event_id || '').trim();
+    if (!id) return;
+    if (seenEventIds[id]) duplicateEventIds.push(id);
+    seenEventIds[id] = true;
+  });
+  if (duplicateEventIds.length) {
+    errors.push({
+      code: 'DUPLICATE_EVENT_ID',
+      ids: duplicateEventIds.slice(0, 20),
+      message: 'EVENT_LOG enthält doppelte event_id-Werte.'
+    });
+  }
+
+  var dashboardProjection = echoLiveDashboardProjection_(
+    eventRows,
+    playableScenes,
+    readRows(ECHO_CONFIG.sheets.relationships)
+  );
+
+  return {
+    ok: errors.length === 0,
+    version: ECHO_HEALTH_REPORT_VERSION,
+    build: ECHO_BUILD_ID,
+    checked_at: new Date().toISOString(),
+    latest: {
+      event_id: latestEvent ? latestEvent.event_id : '',
+      sequence: latestEvent ? Number(latestEvent.sequence || 0) : 0,
+      feed_id: latestScene ? latestScene.feed_id : '',
+      inbox_status: latestInbox ? String(latestInbox.validation_status || '') : 'NOT_FOUND'
+    },
+    counts: dashboardProjection.counts,
+    checks: {
+      schema: { ok: !!(schema && schema.ready) },
+      inboxFeedLink: { ok: feedLinkOk },
+      stateProjection: { ok: stateProjectionOk },
+      sceneReadback: { ok: sceneReadbackOk },
+      dialoguePresentation: {
+        ok: dialoguePresentationOk,
+        dialogueBlocks: dialogueBlocks.length
+      },
+      uniqueEventIds: { ok: duplicateEventIds.length === 0 }
+    },
+    dashboardProjection: dashboardProjection,
+    errors: errors,
+    warnings: warnings
+  };
+}
+
 function echoGetDiagnostics_() {
   var preference = validateEchoPreferenceStorage_({ repair: false });
   var schema = echoPhase2SchemaStatus_();
+  var integrity = echoGetHealthReport_();
   return {
-    ok: preference.ok && schema.ready,
+    ok: preference.ok && schema.ready && integrity.ok,
     build: ECHO_BUILD_ID,
     state_model_version: ECHO_STATE_MODEL_VERSION,
     transaction_model_version: ECHO_TRANSACTION_MODEL_VERSION,
     preference_policy_version: ECHO_PREFERENCE_POLICY_VERSION,
     phase2_schema: schema,
     preference_coverage: preference.preferenceCoverage,
-    errors: preference.errors,
-    warnings: preference.warnings.concat(schema.warnings || [])
+    errors: preference.errors.concat(integrity.errors || []),
+    warnings: preference.warnings.concat(schema.warnings || [], integrity.warnings || []),
+    integrity: integrity
   };
 }
 
@@ -3587,6 +3920,10 @@ const ECHO_FAST_DEFAULT_RUNTIME_KEYS = [
   'player.posture',
   'player.equipment_main_hand',
   'player.held_item',
+  'player_rune_glow_color',
+  'mireth.held_item',
+  'mireth.held_item_label',
+  'mireth.held_item_status',
   'player.clothing_state',
   'player.seal_threshold_state',
   'player.inventory',
@@ -3960,28 +4297,31 @@ function echoFastReadSnapshotMap_(sheet) {
   const valueIndex = headers.indexOf('value');
   const typeIndex = headers.indexOf('value_type');
   const updatedIndex = headers.indexOf('updated_at');
+  const statusIndex = headers.indexOf('record_status');
   if (keyIndex === -1 || valueIndex === -1) return {};
 
-  const latest = {};
+  const rows = [];
   for (let index = 1; index < values.length; index++) {
     const row = values[index];
     const rawKey = String(row[keyIndex] || '').trim();
-    if (!rawKey || isLegacyStateKey_(rawKey)) continue;
-
-    const candidate = {
+    if (!rawKey) continue;
+    rows.push({
+      state_key: rawKey,
       value: row[valueIndex],
       value_type: typeIndex === -1 ? '' : row[typeIndex],
       updated_at: updatedIndex === -1 ? '' : row[updatedIndex],
+      record_status: statusIndex === -1 ? '' : row[statusIndex],
       __rowNumber: index + 1
-    };
-    if (recordIsNewer_(candidate, latest[rawKey])) latest[rawKey] = candidate;
+    });
   }
 
+  const projection = echoCanonicalStateProjectionFromRows_(rows, []);
   const out = {};
-  Object.keys(latest).forEach(function (key) {
+  Object.keys(projection.map).forEach(function (key) {
+    var record = projection.map[key];
     out[key] = echoFastSnapshotValue_(
-      latest[key].value,
-      latest[key].value_type
+      record.value,
+      record.value_type
     );
   });
   return out;
@@ -5372,16 +5712,17 @@ function echoPhase2GroupMembersForContext_(warnings) {
 function getEchoAuthoritativeContext_(options) {
   options = options || {};
   var warnings = [];
-  var stateRows = echoPhase2Rows_(ECHO_CONFIG.sheets.state, warnings);
-  var state = {};
+  var stateProjection = { rows: [], map: {} };
   try {
-    state = getStateMap_();
+    stateProjection = echoCanonicalStateProjection_(warnings);
   } catch (error) {
     warnings.push({
       code: 'CONTEXT_STATE_UNAVAILABLE',
       message: String(error && error.message ? error.message : error)
     });
   }
+  var stateRows = stateProjection.rows;
+  var state = stateProjection.map;
 
   var eventRows = echoPhase2Rows_(ECHO_CONFIG.sheets.eventLog, warnings);
   var sceneRows = echoPhase2Rows_(ECHO_CONFIG.sheets.sceneFeed, warnings);
