@@ -737,15 +737,14 @@ class Component extends DCLogic {
 
     const currentScene = s.currentScene || {};
     const sceneText = currentScene.text || currentScene.narrativeText || '';
-    const sourceBlocks = Array.isArray(currentScene.blocks) ? currentScene.blocks : [];
     const sceneBlocks = sceneText
       .split(/\n\s*\n/)
       .map((text) => text.replace(/\s*\n\s*/g, ' ').trim())
       .filter(Boolean)
       .map((text, index) => {
-        const sourceBlock = sourceBlocks[index] || null;
-        const sourceType = String(sourceBlock && sourceBlock.type || '').toLowerCase();
-        const isDialogue = sourceType === 'dialogue' || /^(?:[^:\n]{1,80}:\s*)?(?:„|"|“|«|—|–)/.test(text);
+        // Only direct speech receives the gold treatment. Narrative text
+        // between dialogue lines must remain on the normal page background.
+        const isDialogue = /^(?:[^:\n]{1,80}:\s*)?(?:„|"|“|«|—|–)\s*/.test(text);
         const isEmphasis = /^(Kälte\.|Ein Echo\.)$/.test(text);
         return {
           text,
