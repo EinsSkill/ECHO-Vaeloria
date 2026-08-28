@@ -440,6 +440,60 @@ window.ECHO_WEB_APP_URL = '<?= webAppUrl ?>';
 
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;demoSaveStatus&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;synced&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;options&quot;:[&quot;synced&quot;,&quot;processing&quot;,&quot;needs_confirmation&quot;,&quot;conflict&quot;],&quot;section&quot;:&quot;Demo&quot;},&quot;reduceMotion&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Demo&quot;},&quot;echoMasteryPreview&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:12,&quot;min&quot;:0,&quot;max&quot;:100,&quot;step&quot;:1,&quot;unit&quot;:&quot;%&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Demo&quot;}}">
+
+function echoClientLegacyBlocks_(raw) {
+  var value = String(raw || '').replace(/\r\n/g, '\n').trim();
+  if (!value) return [];
+
+  var output = [];
+  var add = function (type, text) {
+    var normalized = String(text || '').replace(/\s*\n\s*/g, ' ').trim();
+    if (!normalized) return;
+    output.push({
+      type: type,
+      text: normalized,
+      isDialogue: type === 'dialogue',
+      isEmphasis: type === 'sensory' && /^(Kälte\.|Ein Echo\.)$/.test(normalized)
+    });
+  };
+
+  value.split(/\n\s*\n/).forEach(function (paragraph) {
+    var text = paragraph.replace(/\s*\n\s*/g, ' ').trim();
+    if (!text) return;
+
+    var cursor = 0;
+    var pattern = /„[\s\S]*?“|„[\s\S]*?”|“[\s\S]*?”|«[\s\S]*?»|"[^"\n]+"/g;
+    var match;
+    var found = false;
+
+    while ((match = pattern.exec(text)) !== null) {
+      var before = text.slice(cursor, match.index).trim();
+      var speaker = '';
+      if (!cursor) {
+        var prefix = before.match(/^([A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9'’.-]*(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9'’.-]*){0,4})(?:\s+(?:sagt|fragt|antwortet|erwidert|flüstert|ruft|meint))?:\s*$/i);
+        if (prefix) {
+          speaker = prefix[1];
+          before = '';
+        }
+      }
+      if (before) add('prose', before);
+      add('dialogue', match[0].replace(/^\s*[„“«"]/, '').replace(/[“”»"]\s*$/, ''));
+      output[output.length - 1].speaker = speaker;
+      cursor = match.index + match[0].length;
+      found = true;
+    }
+
+    if (cursor < text.length) add('prose', text.slice(cursor));
+    if (!found && /^[—–]\s+\S/.test(text)) {
+      add('dialogue', text.replace(/^[—–]\s+/, ''));
+    } else if (!found && !output.length) {
+      add('prose', text);
+    }
+  });
+
+  return output;
+}
+
 class Component extends DCLogic {
   state = {
     activeFolio: 'scene',
@@ -849,18 +903,7 @@ class Component extends DCLogic {
             isEmphasis: type === 'sensory' && /^(Kälte\.|Ein Echo\.)$/.test(rawText)
           };
         }).filter((block) => !!block.text)
-      : sceneText
-          .split(/\n\s*\n/)
-          .map((text) => text.replace(/\s*\n\s*/g, ' ').trim())
-          .filter(Boolean)
-          .map((text) => ({
-            type: 'legacy',
-            text,
-            // Legacy scenes have no reliable metadata; only an unmistakable
-            // spoken-line prefix receives the dialogue style.
-            isDialogue: /^(?:[^:\n]{1,80}:\s*)?(?:„|"|“|«|—|–)\s*/.test(text),
-            isEmphasis: /^(Kälte\.|Ein Echo\.)$/.test(text)
-          }));
+      : echoClientLegacyBlocks_(sceneText);
     const sceneBlocks = rawSceneBlocks.map((block, index) => ({
       text: block.text,
       style: {
