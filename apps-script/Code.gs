@@ -902,6 +902,7 @@ function echoCanonicalStateProjectionFromRows_(rows, warnings) {
   };
 }
 
+// State reads are side-effect free: canonical projection never writes workbook state.
 function getStateMap_(warnings) {
   return echoCanonicalStateProjection_(warnings).map;
 }
