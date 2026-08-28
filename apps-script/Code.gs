@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-7-event-reconciliation-2026-08-27';
+var ECHO_BUILD_ID = 'phase-8-latency-and-dialogue-presentation-2026-08-28';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -247,6 +247,23 @@ function includeBase64(filename) {
 
 function getOverlayStateForClient() {
   return getOverlayState_();
+}
+
+var ECHO_PROCESSOR_WAKE_DELAY_MS_ = 1000;
+
+// Ask Apps Script to wake the processor shortly after a new turn is written.
+// The recurring trigger remains the safe fallback when one-shot trigger creation
+// is unavailable or the platform delays the wake.
+function scheduleTurnProcessorWake_() {
+  try {
+    ScriptApp.newTrigger('processTurnInbox')
+      .timeBased()
+      .after(ECHO_PROCESSOR_WAKE_DELAY_MS_)
+      .create();
+    return true;
+  } catch (error) {
+    return false;
+  }
 }
 
 function setupEchoTrigger_() {
@@ -476,6 +493,8 @@ function enqueueTurn_(event) {
       context_fingerprint: event.context_fingerprint || '',
       context_read_at: event.context_read_at || ''
     });
+
+    scheduleTurnProcessorWake_();
 
     return {
       ok: true,
@@ -874,15 +893,55 @@ function sceneTextFromBlocks_(raw, fallback) {
   }).join('\n\n');
 }
 
+function echoDialoguePresentation_() {
+  return {
+    key: 'dialogue-gold',
+    cssClass: 'echo-dialogue',
+    className: 'echo-dialogue',
+    highlighted: true,
+    backgroundColor: 'rgba(201, 162, 39, 0.16)',
+    borderColor: 'rgba(201, 162, 39, 0.46)',
+    textColor: '#6f5200'
+  };
+}
+
+function echoOverlayBlockPresentation_(block) {
+  var type = String(block && block.type || 'prose').toLowerCase();
+  if (type === 'dialogue') return echoDialoguePresentation_();
+
+  return {
+    key: 'plain',
+    cssClass: 'echo-block echo-' + type,
+    className: 'echo-block echo-' + type,
+    highlighted: false
+  };
+}
+
+function echoDecorateOverlayBlock_(block) {
+  var output = Object.assign({}, block);
+  var presentation = echoOverlayBlockPresentation_(block);
+  output.cssClass = presentation.cssClass;
+  output.className = presentation.className;
+  output.presentation = presentation;
+  return output;
+}
+
 function sceneBlocksForOverlay_(scene) {
   if (!scene) return [];
   var raw = scene.scene_blocks_json || scene.blocks_json || scene.blocks;
   var blocks = sceneBlocksFrom_(raw);
-  if (blocks.length) return blocks;
+  if (blocks.length) return blocks.map(echoDecorateOverlayBlock_);
 
   var fallback = String(scene.narrative_text || '').trim();
   return fallback
-    ? [{ type: 'prose', text: fallback, speaker: '', character_id: '', tone: '', emphasis: '' }]
+    ? [echoDecorateOverlayBlock_({
+        type: 'prose',
+        text: fallback,
+        speaker: '',
+        character_id: '',
+        tone: '',
+        emphasis: ''
+      })]
     : [];
 }
 
@@ -1332,11 +1391,18 @@ function echoOverlayContract_() {
       fields: [
         'feedId', 'eventId', 'sceneId', 'revisionId', 'revisionNumber',
         'title', 'narrativeText', 'formattedText', 'text', 'blocks',
-        'resolution', 'sceneType', 'status', 'locationId',
+        'dialoguePresentation', 'resolution', 'sceneType', 'status', 'locationId',
         'sceneContractVersion', 'resolutionContractVersion'
       ],
       blocks_source: 'SCENE_FEED.scene_blocks_json',
-      rendering_rule: 'Render visible blocks in order; use formattedText/text only as a legacy fallback.'
+      rendering_rule: 'Render visible blocks in order; apply blocks[].cssClass/presentation. Use formattedText/text only as a legacy fallback.',
+      dialogue_presentation: {
+        block_type: 'dialogue',
+        style_key: 'dialogue-gold',
+        class_field: 'blocks[].cssClass',
+        metadata_field: 'blocks[].presentation',
+        highlighted: true
+      }
     },
     chronicle: {
       field: 'chronicle',
@@ -1954,6 +2020,8 @@ function overlaySceneDeliveryPayload_(scene) {
     formattedText: formattedText,
     text: formattedText,
     blocks: sceneBlocksForOverlay_(scene),
+    dialoguePresentation: echoDialoguePresentation_(),
+    dialogue_presentation: echoDialoguePresentation_(),
     resolution: normalizeResolution_(scene.resolution_json),
     sceneType: scene.scene_type || 'narrative',
     scene_type: scene.scene_type || 'narrative',
@@ -3560,6 +3628,8 @@ function echoSubmitTurn(turn) {
 
     if (!verified) throw new Error('TURN_INBOX verification failed after write.');
 
+    scheduleTurnProcessorWake_();
+
     return {
       ok: written.validation_status !== 'ERROR',
       accepted: true,
@@ -3652,11 +3722,19 @@ function echoFastReadLatestInboxRow_(sheet) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return null;
 
-  const values = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
+  // Read headers and all inbox rows once. The old implementation reread the
+  // complete row and header range for every candidate row.
+  const lastColumn = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0].map(function (value) {
+    return String(value || '').trim();
+  });
+  const indexes = echoFastInboxHeaderIndexes_(headers);
+  const values = sheet.getRange(2, 1, lastRow - 1, lastColumn).getValues();
   let latest = null;
-  values.forEach(function (value, index) {
-    if (!String(value[0] || '').trim()) return;
-    const candidate = echoFastReadInboxRow_(sheet, index + 2);
+
+  values.forEach(function (rowValues, index) {
+    const candidate = echoFastInboxRowFromValues_(indexes, rowValues, index + 2);
+    if (!candidate.turn_id) return;
     if (!latest || echoFastInboxRowIsLater_(candidate, latest)) latest = candidate;
   });
   return latest;
@@ -3669,21 +3747,24 @@ function echoFastInboxRowIsLater_(candidate, current) {
   return Number(candidate && candidate.row || 0) > Number(current && current.row || 0);
 }
 
-function echoFastReadInboxRow_(sheet, row) {
-  var values = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
-  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(function (value) {
-    return String(value || '').trim();
+function echoFastInboxHeaderIndexes_(headers) {
+  var indexes = {};
+  headers.forEach(function (header, index) {
+    if (header && indexes[header] === undefined) indexes[header] = index;
   });
+  return indexes;
+}
+
+function echoFastInboxRowFromValues_(indexes, values, row) {
+  var field = function (name) {
+    var index = indexes[name];
+    return index === undefined ? '' : values[index];
+  };
   var parsed = null;
 
-  var field = function (name) {
-    var index = headers.indexOf(name);
-    return index === -1 ? '' : values[index];
-  };
-
-  if (field('parsed_intent_json')) {
+  var raw = field('parsed_intent_json');
+  if (raw) {
     try {
-      var raw = field('parsed_intent_json');
       parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch (err) {
       parsed = null;
@@ -3707,6 +3788,19 @@ function echoFastReadInboxRow_(sheet, row) {
     event_id: parsed && parsed.event_id ? parsed.event_id : null,
     scene_feed_id: parsed && parsed.scene && parsed.scene.feed_id ? parsed.scene.feed_id : null
   };
+}
+
+function echoFastReadInboxRow_(sheet, row) {
+  var lastColumn = sheet.getLastColumn();
+  var headers = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0].map(function (value) {
+    return String(value || '').trim();
+  });
+  var values = sheet.getRange(row, 1, 1, lastColumn).getValues()[0];
+  return echoFastInboxRowFromValues_(
+    echoFastInboxHeaderIndexes_(headers),
+    values,
+    row
+  );
 }
 
 function echoFastReadSnapshotMap_(sheet) {
