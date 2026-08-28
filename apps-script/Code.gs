@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-18-overlay-display-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-19-release-regression-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -55,6 +55,14 @@ var ECHO_PHASE16_INTIMACY_CONTRACT_VERSION = '1.0.0';
 var ECHO_PHASE17_MAGIC_VERSION = '1.0.0';
 var ECHO_PHASE17_MAGIC_CONTRACT_VERSION = '1.0.0';
 var ECHO_PHASE18_OVERLAY_VERSION = '1.0.0';
+var ECHO_PHASE19_RELEASE_VERSION = '1.0.0';
+var ECHO_PHASE19_REQUIRED_PACKAGE_FILES_ = [
+  'Code.gs',
+  'Index.html',
+  'ECHO_Overlay_Config.html',
+  'ECHO_Overlay_Support.html',
+  'appsscript.json'
+];
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -162,7 +170,7 @@ function echoChatDeliveryPolicy_() {
 function doGet(e) {
   var action = e && e.parameter ? String(e.parameter.action || '') : '';
   if (action === 'health') {
-    return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0', build: ECHO_BUILD_ID, state_model: ECHO_STATE_MODEL_VERSION, preference_policy: ECHO_PREFERENCE_POLICY_VERSION });
+    return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0', build: ECHO_BUILD_ID, state_model: ECHO_STATE_MODEL_VERSION, preference_policy: ECHO_PREFERENCE_POLICY_VERSION, release_phase: 19, release_version: ECHO_PHASE19_RELEASE_VERSION });
   }
   if (action === 'health-report') {
     return jsonOutput_(echoGetHealthReport_());
@@ -205,6 +213,13 @@ function doGet(e) {
   }
   if (action === 'overlay-display-contract') {
     return jsonOutput_(echoGetOverlayDisplayContract());
+  }
+  if (action === 'release-contract') {
+    return jsonOutput_(echoGetReleaseContract());
+  }
+  if (action === 'release-audit') {
+    requireApiKey_(e && e.parameter ? e.parameter.token : '');
+    return jsonOutput_(echoRunReleaseAudit());
   }
   if (action === 'context-binding-contract') {
     return jsonOutput_(echoGetContextBindingContract());
@@ -268,7 +283,7 @@ function doPost(e) {
     // Existing direct API remains fully backwards compatible.
     requireApiKey_(body.token || (e && e.parameter ? e.parameter.token : ''));
     if (body.action === 'health') {
-      return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0', build: ECHO_BUILD_ID, state_model: ECHO_STATE_MODEL_VERSION, preference_policy: ECHO_PREFERENCE_POLICY_VERSION });
+      return jsonOutput_({ ok: true, service: 'ECHO', version: '1.1.0', build: ECHO_BUILD_ID, state_model: ECHO_STATE_MODEL_VERSION, preference_policy: ECHO_PREFERENCE_POLICY_VERSION, release_phase: 19, release_version: ECHO_PHASE19_RELEASE_VERSION });
     }
 
     // Every external game turn enters TURN_INBOX as PENDING. The processor
@@ -3173,6 +3188,431 @@ function echoGetOverlayDisplayContract() {
     ok: true,
     contract: echoPhase18DisplayContract_()
   };
+}
+
+/* ===== Phase 19: final read-only release regression ===== */
+
+// Phase 19 is the last deployment gate. It is intentionally read-only: it
+// checks the private workbook-backed runtime without changing canon, state,
+// preferences or story content.
+
+function echoPhase19ReleaseContract_() {
+  return {
+    version: ECHO_PHASE19_RELEASE_VERSION,
+    phase: 19,
+    release_gate: 'READ_ONLY_END_TO_END_REGRESSION',
+    source_of_truth: 'ECHO_WORKBOOK',
+    package_files: ECHO_PHASE19_REQUIRED_PACKAGE_FILES_.slice(),
+    no_workbook_writes: true,
+    checks: [
+      'runtime schema and required headers',
+      'preference coverage and validation',
+      'health and canonical state integrity',
+      'overlay scene readback and block presentation',
+      'relationship deduplication, safety and technical-placeholder filtering',
+      'magic projection and hidden exact mastery number',
+      'overlay-only chat delivery and commit/readback rule',
+      'idempotent processing and retry invariants'
+    ],
+    blocking_policy: 'A BLOCK result must be fixed before the five package files are deployed.',
+    narrative_policy: 'The audit returns metadata only; it never returns a narrative to chat.',
+    state_policy: 'All canon, preferences, relationship values and current story facts remain in the private workbook.'
+  };
+}
+
+function echoGetReleaseContract() {
+  return {
+    ok: true,
+    contract: echoPhase19ReleaseContract_()
+  };
+}
+
+function echoPhase19AddCheck_(checks, errors, warnings, id, key, status, message, details) {
+  var item = {
+    check_id: id,
+    check_key: key,
+    status: status,
+    message: message
+  };
+  if (details !== undefined) item.details = details;
+  checks.push(item);
+
+  if (status === 'BLOCK') {
+    errors.push(item);
+  } else if (status === 'WARN') {
+    warnings.push(item);
+  }
+}
+
+function echoPhase19SafeError_(error) {
+  return String(error && error.message ? error.message : error).slice(0, 240);
+}
+
+function echoPhase19RunReleaseAudit_() {
+  var checks = [];
+  var errors = [];
+  var warnings = [];
+
+  echoPhase19AddCheck_(
+    checks,
+    errors,
+    warnings,
+    'R-001',
+    'package_and_contracts',
+    typeof echoPhase18DisplayContract_ === 'function' &&
+      typeof echoPhase17MagicContract_ === 'function' &&
+      typeof echoIntimacyContract_ === 'function'
+      ? 'PASS'
+      : 'BLOCK',
+    'Phase-16 bis Phase-18 Verträge sind im konsolidierten Backend vorhanden.',
+    {
+      package_files: ECHO_PHASE19_REQUIRED_PACKAGE_FILES_.slice(),
+      source_of_truth: 'ECHO_WORKBOOK'
+    }
+  );
+
+  var schema = null;
+  try {
+    schema = echoPhase2SchemaStatus_();
+    var schemaMissing = [];
+    Object.keys(schema.sheets || {}).forEach(function (sheetName) {
+      var sheet = schema.sheets[sheetName] || {};
+      if (sheet.present === false) schemaMissing.push(sheetName);
+      (sheet.missing || []).forEach(function (field) {
+        schemaMissing.push(sheetName + '.' + field);
+      });
+    });
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-002',
+      'runtime_schema',
+      schema.ready ? 'PASS' : 'BLOCK',
+      schema.ready
+        ? 'Das Runtime-Schema ist vollständig vorhanden.'
+        : 'Das Runtime-Schema ist nicht vollständig migriert.',
+      {
+        version: schema.version,
+        missing: schemaMissing.slice(0, 100)
+      }
+    );
+  } catch (error) {
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-002',
+      'runtime_schema',
+      'BLOCK',
+      'Das Runtime-Schema konnte nicht geprüft werden.',
+      { error: echoPhase19SafeError_(error) }
+    );
+  }
+
+  try {
+    var preference = validateEchoPreferenceStorage_({ repair: false });
+    var coverage = preference.preferenceCoverage || {};
+    var preferenceReady = preference.ok === true && coverage.complete === true;
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-003',
+      'preference_coverage',
+      preferenceReady ? 'PASS' : 'BLOCK',
+      preferenceReady
+        ? 'Präferenzen und beantwortete Fragen sind vollständig validiert.'
+        : 'Präferenzen oder die Fragenabdeckung sind nicht vollständig validiert.',
+      {
+        present_questions: Number(coverage.presentQuestions || 0),
+        total_questions: Number(coverage.totalQuestions || 0),
+        missing_question_ids: Array.isArray(coverage.missingQuestionIds)
+          ? coverage.missingQuestionIds.slice(0, 50)
+          : []
+      }
+    );
+  } catch (error) {
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-003',
+      'preference_coverage',
+      'BLOCK',
+      'Die Präferenzprojektion konnte nicht geprüft werden.',
+      { error: echoPhase19SafeError_(error) }
+    );
+  }
+
+  try {
+    var health = echoGetHealthReport_();
+    var healthErrors = Array.isArray(health.errors) ? health.errors : [];
+    var healthWarnings = Array.isArray(health.warnings) ? health.warnings : [];
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-004',
+      'health_integrity',
+      health.ok === true ? 'PASS' : 'BLOCK',
+      health.ok === true
+        ? 'Gesundheits- und Integritätsprüfung ist bestanden.'
+        : 'Die Gesundheits- oder Integritätsprüfung meldet Fehler.',
+      {
+        error_count: healthErrors.length,
+        warning_count: healthWarnings.length,
+        error_codes: healthErrors.map(function (item) {
+          return String(item && (item.code || item.check_id) || 'UNKNOWN').slice(0, 80);
+        }).slice(0, 30)
+      }
+    );
+  } catch (error) {
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-004',
+      'health_integrity',
+      'BLOCK',
+      'Die Gesundheitsprüfung konnte nicht ausgeführt werden.',
+      { error: echoPhase19SafeError_(error) }
+    );
+  }
+
+  var overlay = null;
+  try {
+    overlay = getOverlayState_();
+    var currentScene = overlay.currentScene || {};
+    var blocks = Array.isArray(currentScene.blocks) ? currentScene.blocks : [];
+    var malformedBlocks = blocks.filter(function (block) {
+      return !block || !String(block.type || '').trim() || !String(block.text || '').trim();
+    });
+    var highlightedNonDialogue = blocks.filter(function (block) {
+      return block && block.presentation && block.presentation.highlighted === true &&
+        String(block.type || '').toLowerCase() !== 'dialogue';
+    });
+    var dialogueWithoutPresentation = blocks.filter(function (block) {
+      return block && String(block.type || '').toLowerCase() === 'dialogue' &&
+        (!block.presentation || block.presentation.highlighted !== true);
+    });
+    var sceneHasContent = !!String(
+      currentScene.feedId || currentScene.feed_id || currentScene.text || ''
+    ).trim();
+    var sceneCheckStatus = malformedBlocks.length ||
+      highlightedNonDialogue.length ||
+      dialogueWithoutPresentation.length
+      ? 'BLOCK'
+      : (sceneHasContent ? 'PASS' : 'WARN');
+
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-005',
+      'overlay_scene_and_dialogue',
+      sceneCheckStatus,
+      sceneCheckStatus === 'BLOCK'
+        ? 'Die Szenenblöcke oder die Dialogdarstellung sind inkonsistent.'
+        : (sceneCheckStatus === 'PASS'
+          ? 'Szenenblöcke sind lesbar; nur Dialogblöcke tragen die Hervorhebung.'
+          : 'Noch keine sichtbare Szene vorhanden; die Darstellung bleibt bereit.'),
+      {
+        block_count: blocks.length,
+        malformed_block_count: malformedBlocks.length,
+        highlighted_non_dialogue_count: highlightedNonDialogue.length,
+        dialogue_without_presentation_count: dialogueWithoutPresentation.length
+      }
+    );
+
+    var chatDelivery = overlay.chatDelivery || {};
+    var deliveryReady = chatDelivery.mode === 'OVERLAY_ONLY' &&
+      chatDelivery.include_narrative_in_chat === false &&
+      String(chatDelivery.completion_rule || '').indexOf('COMMIT') !== -1;
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-006',
+      'chat_delivery',
+      deliveryReady ? 'PASS' : 'BLOCK',
+      deliveryReady
+        ? 'Narrative bleibt im Overlay und der Chat erhält nur die Bestätigung nach Readback.'
+        : 'Die Chat-/Overlay-Lieferregel ist nicht korrekt aktiv.',
+      {
+        mode: chatDelivery.mode || null,
+        include_narrative_in_chat: chatDelivery.include_narrative_in_chat,
+        completion_rule: chatDelivery.completion_rule || null
+      }
+    );
+  } catch (error) {
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-005',
+      'overlay_scene_and_dialogue',
+      'BLOCK',
+      'Die Overlay-Projektion konnte nicht gelesen werden.',
+      { error: echoPhase19SafeError_(error) }
+    );
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-006',
+      'chat_delivery',
+      'BLOCK',
+      'Die Chat-Lieferregel konnte wegen eines Overlay-Fehlers nicht geprüft werden.',
+      { error: echoPhase19SafeError_(error) }
+    );
+  }
+
+  if (overlay) {
+    var visibleRelationships = Array.isArray(overlay.relationships)
+      ? overlay.relationships
+      : [];
+    var technicalRelationshipIds = [
+      'WISE_GUIDE',
+      'WISEGUIDE',
+      'SYSTEM_GUIDE',
+      'RELATIONSHIP_TEMPLATE',
+      'GENERIC_GUIDE',
+      'UNKNOWN_RELATIONSHIP'
+    ];
+    var seenEntities = {};
+    var duplicateEntities = [];
+    var technicalRelationships = [];
+    var relationshipSafetyGaps = [];
+
+    visibleRelationships.forEach(function (relationship) {
+      relationship = relationship || {};
+      var entityId = String(relationship.entityId || relationship.entity_id || '').trim();
+      var displayName = String(relationship.name || '').trim();
+      var normalizedId = entityId.toUpperCase().replace(/[ -]+/g, '_');
+      var normalizedName = displayName.toUpperCase().replace(/[ -]+/g, '_');
+      if (seenEntities[entityId]) duplicateEntities.push(entityId);
+      if (entityId) seenEntities[entityId] = true;
+      if (technicalRelationshipIds.indexOf(normalizedId) !== -1 ||
+          technicalRelationshipIds.indexOf(normalizedName) !== -1) {
+        technicalRelationships.push(entityId || displayName);
+      }
+      if (!relationship.safety ||
+          relationship.safety.consentState === undefined ||
+          relationship.safety.boundaryStatus === undefined) {
+        relationshipSafetyGaps.push(entityId || displayName || 'UNKNOWN_RELATIONSHIP');
+      }
+    });
+
+    var relationshipStatus = technicalRelationships.length || duplicateEntities.length
+      ? 'BLOCK'
+      : (relationshipSafetyGaps.length ? 'BLOCK' : 'PASS');
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-007',
+      'relationship_directory',
+      relationshipStatus,
+      relationshipStatus === 'PASS'
+        ? 'Beziehungen sind dedupliziert und zeigen Sicherheits-/Grenzenstatus.'
+        : 'Beziehungsprojektion enthält technische Einträge, Duplikate oder unvollständige Sicherheitsdaten.',
+      {
+        visible_count: visibleRelationships.length,
+        technical_count: technicalRelationships.length,
+        duplicate_count: duplicateEntities.length,
+        safety_gap_count: relationshipSafetyGaps.length
+      }
+    );
+
+    var magicCurrent = ((overlay.magicProjection || {}).current || {});
+    var mastery = magicCurrent.mastery || {};
+    var magicShapeReady = mastery.exactNumberHidden === true &&
+      mastery.percent === null &&
+      Object.prototype.hasOwnProperty.call(magicCurrent, 'stageLabel') &&
+      Object.prototype.hasOwnProperty.call(magicCurrent, 'runeGlowColor');
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-008',
+      'magic_projection',
+      magicShapeReady ? 'PASS' : 'BLOCK',
+      magicShapeReady
+        ? 'Magieprojektion nutzt den gespeicherten Stand und verbirgt exakte Zahlen.'
+        : 'Magieprojektion ist unvollständig oder könnte eine erfundene Zahl anzeigen.',
+      {
+        stage_known: !!String(magicCurrent.stageLabel || magicCurrent.stage || '').trim(),
+        rune_color_known: !!String(magicCurrent.runeGlowColor || '').trim(),
+        exact_number_hidden: mastery.exactNumberHidden === true
+      }
+    );
+  } else {
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-007',
+      'relationship_directory',
+      'BLOCK',
+      'Beziehungsprojektion konnte nicht geprüft werden.'
+    );
+    echoPhase19AddCheck_(
+      checks,
+      errors,
+      warnings,
+      'R-008',
+      'magic_projection',
+      'BLOCK',
+      'Magieprojektion konnte nicht geprüft werden.'
+    );
+  }
+
+  var runtime = echoPhase12RuntimeContract_();
+  var runtimeReady = runtime.overlay &&
+    runtime.overlay.stale_snapshot_guard === true &&
+    runtime.overlay.single_flight_client_sync === true &&
+    runtime.processor &&
+    runtime.processor.duplicate_turns_are_idempotent === true &&
+    runtime.retry &&
+    runtime.retry.never_duplicate_event_or_transaction === true;
+  echoPhase19AddCheck_(
+    checks,
+    errors,
+    warnings,
+    'R-009',
+    'runtime_idempotency_and_stale_guard',
+    runtimeReady ? 'PASS' : 'BLOCK',
+    runtimeReady
+      ? 'Stale-Response-Schutz, Single-Flight-Sync und Idempotenz sind aktiv.'
+      : 'Ein zentraler Runtime-Schutz ist nicht aktiv.',
+    {
+      stale_snapshot_guard: !!(runtime.overlay && runtime.overlay.stale_snapshot_guard),
+      single_flight_client_sync: !!(runtime.overlay && runtime.overlay.single_flight_client_sync),
+      duplicate_turns_are_idempotent: !!(runtime.processor && runtime.processor.duplicate_turns_are_idempotent),
+      never_duplicate_event_or_transaction: !!(runtime.retry && runtime.retry.never_duplicate_event_or_transaction)
+    }
+  );
+
+  var blocking = checks.filter(function (check) { return check.status === 'BLOCK'; });
+  return {
+    ok: blocking.length === 0,
+    phase: 19,
+    version: ECHO_PHASE19_RELEASE_VERSION,
+    build: ECHO_BUILD_ID,
+    status: blocking.length ? 'BLOCKED' : (warnings.length ? 'READY_WITH_WARNINGS' : 'READY'),
+    checked_at: new Date().toISOString(),
+    read_only: true,
+    workbook_writes: 0,
+    private_content_included: false,
+    checks: checks,
+    errors: errors,
+    warnings: warnings
+  };
+}
+
+function echoRunReleaseAudit() {
+  return echoPhase19RunReleaseAudit_();
 }
 
 function echoPhase18LocationProjection_(state, scene, locationId) {
