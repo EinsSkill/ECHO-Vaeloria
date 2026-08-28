@@ -5,6 +5,7 @@ Dieser Ordner enthält den öffentlichen, secret-freien Apps-Script-Code der Liv
 ## Standalone-Backend
 
 - `Code.gs` – vollständiger Apps-Script-Backend mit Einstieg, Turn-Vertrag, Schema-Migration, Inbox-Processor, Overlay-Projektion, Sheets-Helfern und Fast Turn Gateway
+- `Index.html` – generischer Overlay-Renderer mit Vorlesefunktion und goldener Dialogdarstellung
 
 Die Backend-Logik liegt absichtlich in einer einzigen `.gs`-Datei. Dadurch kann der Inhalt von `Code.gs` vollständig in das private ECHO-Apps-Script-Projekt übernommen werden, ohne dass einzelne Abhängigkeiten fehlen oder doppelte globale Definitionen entstehen.
 
