@@ -188,15 +188,17 @@ window.ECHO_WEB_APP_URL = '<?= webAppUrl ?>';
                       </div>
                     </sc-for>
                   </div>
-                  <sc-if value="{{ rel.intimacy.available }}" hint-placeholder-val="{{ false }}">
-                    <div style="margin-top:14px; padding-top:11px; border-top:1px solid rgba(27,67,50,0.10);">
-                      <div style="font-size:10.5px; letter-spacing:1.1px; text-transform:uppercase; color:#8A8264; margin-bottom:5px;">Nähe &amp; Grenzen</div>
-                      <div style="font-size:12.5px; color:#655F4E;">{{ rel.intimacy.consentLabel }}<sc-if value="{{ rel.intimacy.phase }}" hint-placeholder-val=""> · {{ rel.intimacy.phase }}</sc-if></div>
-                      <sc-if value="{{ rel.intimacy.boundaries.length }}" hint-placeholder-val="{{ false }}">
-                        <div style="font-size:11.5px; color:#8A8264; margin-top:4px;">Grenzen werden im Spielstand berücksichtigt.</div>
-                      </sc-if>
-                    </div>
-                  </sc-if>
+                  <div style="margin-top:14px; padding-top:11px; border-top:1px solid rgba(27,67,50,0.10);">
+                    <div style="font-size:10.5px; letter-spacing:1.1px; text-transform:uppercase; color:#8A8264; margin-bottom:5px;">Nähe &amp; Grenzen</div>
+                    <div style="font-size:12.5px; color:#655F4E;">{{ rel.intimacy.consentLabel }}<sc-if value="{{ rel.intimacy.phase }}" hint-placeholder-val=""> · {{ rel.intimacy.phase }}</sc-if></div>
+                    <div style="font-size:11.5px; color:#8A8264; margin-top:4px;">{{ rel.intimacyEligibleLabel }}</div>
+                    <sc-if value="{{ rel.intimacy.boundaries.length }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:11.5px; color:#8A8264; margin-top:4px;">Grenzen werden im Spielstand berücksichtigt.</div>
+                    </sc-if>
+                    <sc-if value="{{ rel.intimacy.boundaryStatus }}" hint-placeholder-val="">
+                      <div style="font-size:11.5px; color:#8A8264; margin-top:4px;">Grenzenstatus: {{ rel.intimacy.boundaryStatus }}</div>
+                    </sc-if>
+                  </div>
                   <sc-if value="{{ rel.expanded }}" hint-placeholder-val="{{ false }}">
                     <div style="margin-top:14px; padding:12px 14px; background:rgba(27,67,50,0.05); border-left:2px solid #C9A227;">
                       <div style="font-size:10.5px; letter-spacing:1.1px; text-transform:uppercase; color:#8A8264; margin-bottom:6px;">Beziehungsdetails</div>
@@ -268,10 +270,10 @@ window.ECHO_WEB_APP_URL = '<?= webAppUrl ?>';
               <svg width="120" height="120" viewBox="0 0 84 84">
                 <circle cx="42" cy="42" r="36" fill="none" stroke="#1B4332" stroke-width="6" opacity="0.22"></circle>
                 <circle cx="42" cy="42" r="36" fill="none" stroke="#C9A227" stroke-width="6" stroke-linecap="round" stroke-dasharray="{{ echoRingDasharray }}" transform="rotate(-90 42 42)"></circle>
-                <text x="42" y="39" text-anchor="middle" font-family="Public Sans, sans-serif" font-size="17" font-weight="700" fill="#26221B">{{ echoPctLabel }}</text>
+                <text x="42" y="39" text-anchor="middle" font-family="Public Sans, sans-serif" font-size="17" font-weight="700" fill="#26221B">{{ echoStatusLabel }}</text>
                 <text x="42" y="53" text-anchor="middle" font-family="Public Sans, sans-serif" font-size="7.5" letter-spacing="1" fill="#655F4E">INSTABIL</text>
               </svg>
-              <div style="font-size:12.5px; color:#655F4E; margin-top:10px; line-height:1.5;">ECHO-Beherrschung wächst durch Übung, Bindung und Risiko.</div>
+              <div style="font-size:12.5px; color:#655F4E; margin-top:10px; line-height:1.5;">{{ echoStageLabel }} · Runen: {{ echoRuneGlowLabel }}</div>
               <div style="font-size:11px; color:#9B9480; margin-top:14px;">{{ playerView.clockLabel }}</div>
             </div>
           </div>
@@ -347,8 +349,9 @@ window.ECHO_WEB_APP_URL = '<?= webAppUrl ?>';
         </svg>
         <div>
           <div style="{{ marginHeadingStyle }} margin-bottom:2px;">ECHO</div>
-          <div style="font-size:16px; font-weight:700; color:#1B4332;">{{ echoPctLabel }}</div>
-          <div style="font-size:11px; color:#5C6B5E;">instabil</div>
+          <div style="font-size:16px; font-weight:700; color:#1B4332;">{{ echoStatusLabel }}</div>
+          <div style="font-size:11px; color:#5C6B5E;">{{ echoStageLabel }}</div>
+          <div style="font-size:11px; color:#5C6B5E;">Runen: {{ echoRuneGlowLabel }}</div>
         </div>
       </div>
       <div style="margin-bottom:22px;">
@@ -494,6 +497,59 @@ function echoClientLegacyBlocks_(raw) {
   return output;
 }
 
+
+function echoClientNormalizeBlockType_(block) {
+  var raw = String(block && block.type || 'prose').toLowerCase().replace(/[\s-]+/g, '_');
+  var aliases = {
+    narrative: 'prose',
+    narration: 'prose',
+    description: 'prose',
+    dialog: 'dialogue',
+    speech: 'dialogue',
+    npc_dialogue: 'dialogue',
+    stage_direction: 'action',
+    emote: 'action',
+    gesture: 'action',
+    sensory: 'sensory',
+    system_message: 'system',
+    mechanic: 'system',
+    consequence: 'change',
+    update: 'change',
+    status_line: 'status',
+    next_action: 'prompt',
+    choice: 'prompt',
+    question: 'prompt'
+  };
+  return aliases[raw] || raw || 'prose';
+}
+
+function echoClientVisibleRelationships_(relationships) {
+  var seen = {};
+  var technical = {
+    WISE_GUIDE: true,
+    GUIDE: true,
+    SYSTEM: true,
+    PLAYER: true,
+    UNKNOWN_RELATIONSHIP: true
+  };
+  return (Array.isArray(relationships) ? relationships : []).filter(function (relationship) {
+    relationship = relationship || {};
+    var entityId = String(
+      relationship.entityId ||
+      relationship.entity_id ||
+      relationship.name ||
+      relationship.id ||
+      ''
+    ).trim();
+    var normalizedId = entityId.toUpperCase();
+    if (!entityId || technical[normalizedId]) return false;
+    var key = normalizedId;
+    if (seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
+}
+
 class Component extends DCLogic {
   state = {
     activeFolio: 'scene',
@@ -507,7 +563,8 @@ class Component extends DCLogic {
     interactionNotice: '',
     saveStatus: 'loading',
     syncSource: 'loading',
-    echoMasteryPreview: 12,
+    echoMasteryPreview: 0,
+    magicProjection: { current: { stageLabel: 'Resonanzstand unbekannt', runeGlowColor: null, mastery: { status: 'unknown' } } },
     lastConsequence: null,
     speechSupported: false,
     speechAuto: false,
@@ -737,7 +794,8 @@ class Component extends DCLogic {
       'relationshipProfiles', 'threads', 'inventory', 'knownFacts', 'mapRegions',
       'chapters', 'selectedMapRegion', 'player', 'stateSummary', 'groupMembers',
       'projections', 'worldProjection', 'characterProjections', 'groupProjections',
-      'relationshipProjections', 'characters', 'groups'
+      'relationshipProjections', 'characters', 'groups', 'magicProjection',
+      'magicContract', 'intimacyContract', 'relationshipContract', 'groupContract'
     ];
     const next = {};
     allowedKeys.forEach((key) => {
@@ -832,11 +890,17 @@ class Component extends DCLogic {
     const reduced = this.isReduced();
     const f = s.activeFolio;
 
-    const base = (s.echoMasteryPreview === undefined || s.echoMasteryPreview === null) ? 12 : s.echoMasteryPreview;
-    const echoPct = Math.max(0, Math.min(100, Math.round(base)));
+    const magicProjection = s.magicProjection || {};
+    const magicCurrent = magicProjection.current || {};
+    const magicMastery = magicCurrent.mastery || {};
+    const numericMastery = Number(s.echoMasteryPreview);
+    const echoPct = Number.isFinite(numericMastery) ? Math.max(0, Math.min(100, Math.round(numericMastery))) : 0;
     const circumference = 226.19;
     const echoRingDasharray = (echoPct / 100 * circumference).toFixed(1) + ' ' + circumference;
-    const echoPctLabel = echoPct + '%';
+    const echoStatusLabel = magicMastery.status === 'established' ? 'etabliert' : 'unbekannt';
+    const echoStageLabel = magicCurrent.stageLabel || magicCurrent.stage || 'Resonanzstand unbekannt';
+    const echoRuneGlowLabel = magicCurrent.runeGlowColor || 'unbekannt';
+    const echoPctLabel = echoStatusLabel;
 
     const demoStatus = this.props.demoSaveStatus || 'synced';
     const displaySaveStatus = s.saveStatus || demoStatus;
@@ -890,7 +954,7 @@ class Component extends DCLogic {
     const serverBlocks = Array.isArray(currentScene.blocks) ? currentScene.blocks : [];
     const rawSceneBlocks = serverBlocks.length
       ? serverBlocks.map((block) => {
-          const type = String(block && block.type || 'prose').toLowerCase();
+          const type = echoClientNormalizeBlockType_(block);
           const rawText = String(block && (block.text !== undefined ? block.text : block.content) || '').trim();
           const speaker = String(block && (block.speaker || block.character_id) || '').trim();
           const dialogueText = rawText.replace(/^[„"“«]+|[“"”»]+$/g, '').trim();
@@ -960,17 +1024,20 @@ class Component extends DCLogic {
     }));
     const selectedRegion = mapRegionsComputed.find((r) => r.id === s.selectedMapRegion) || mapRegionsComputed[0];
 
-    const relationshipsComputed = s.relationships.map((r) => ({
+    const relationshipsComputed = echoClientVisibleRelationships_(s.relationships).map((r) => ({
       ...r,
       expanded: s.selectedRelationshipId === r.id,
       onClick: this.selectRelationship(r.id),
       detailLines: [
         'Einvernehmen: ' + ((r.intimacy && r.intimacy.consentLabel) || 'Grenzen noch nicht geklärt'),
+        'Stats: ' + ((r.stats && r.stats.numericStateLabel) || 'noch nicht erspielt'),
         r.intimacy && r.intimacy.tensionState ? 'Dynamik: ' + r.intimacy.tensionState : '',
         r.intimacy && r.intimacy.phase ? 'Phase: ' + r.intimacy.phase : '',
         r.intimacy && r.intimacy.boundaries && r.intimacy.boundaries.length ? 'Grenzen: ' + r.intimacy.boundaries.join(', ') : 'Grenzen: noch keine strukturierte Liste im Spielstand'
       ].filter(Boolean),
-      intimacy: r.intimacy || { available: false, consentLabel: 'Grenzen noch nicht geklärt', phase: '', boundaries: [] },
+      intimacy: r.intimacy || { available: false, consentLabel: 'Grenzen noch nicht geklärt', phase: '', boundaries: [], boundaryStatus: 'not_recorded' },
+      statsLabel: (r.stats && r.stats.numericStateLabel) || 'noch nicht erspielt',
+      intimacyEligibleLabel: r.intimacy && r.intimacy.eligible ? 'für aktuelle Nähe freigegeben' : 'keine aktuelle Nähefreigabe',
       axesComputed: (r.axes || []).map((a) => ({
         label: a.label,
         stateLabel: a.stateLabel || '',
@@ -1058,7 +1125,7 @@ class Component extends DCLogic {
       chroniclePreview, chronicleReversed, currentChapterLabel, chaptersComputed,
       sceneActionsWithHandlers, mapRegionsComputed, selectedRegion, relationshipsComputed, relationshipsPreview,
       threadsComputed, threadsPreview, inventoryComputed, knownFacts: s.knownFacts, tagStyle, playerView, stateSummary,
-      echoRingDasharray, echoPctLabel, saveLabel, saveDotStyle,
+      echoRingDasharray, echoPctLabel, echoStatusLabel, echoStageLabel, echoRuneGlowLabel, magicProjection, saveLabel, saveDotStyle,
       nav, navSmall, rootStyle, bodyGridStyle, leftRailStyle, centerStyle, rightRailContainerStyle, scrimStyle,
       pageEnterStyle, marginHeadingStyle, marginNotesButtonStyle, footerStyle, mobileTabBarStyle, mobileTabItemStyle,
       navRowHoverStyle, mapPinHoverStyle, linkBtnStyle, linkBtnHoverStyle, footerChipStyle, footerChipHoverStyle, footerInputHintStyle,
