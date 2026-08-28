@@ -122,7 +122,7 @@ Auch Phase 7 verändert keine privaten Tabellenwerte und benötigt keine zusätz
 
 - Neue Züge fordern nach dem Schreiben einen einmaligen Processor-Wake an; der bestehende Minuten-Trigger bleibt als Fallback erhalten.
 - Der Fast Turn Gateway liest den neuesten Inbox-Eintrag jetzt mit einem gebündelten Tabellen-Read statt mit einem zusätzlichen Range-Read pro Zeile.
-- Overlay-Blöcke vom Typ `dialogue` erhalten zusätzlich `cssClass: "echo-dialogue"`, `className` und `presentation.style_key: "dialogue-gold"`. Die Darstellung bleibt eine Aufgabe des privaten Overlay-Renderers; private HTML- oder Story-Inhalte werden nicht ins Repository übernommen.
+- Overlay-Blöcke vom Typ `dialogue` erhalten zusätzlich `cssClass: "echo-dialogue"`, `className` und `presentation.style_key: "dialogue-gold"`. `Index.html` nutzt zusätzlich den echten Blocktyp und färbt Dialogblöcke sichtbar gold hinterlegt; `ECHO_Overlay_Config.html` und `ECHO_Overlay_Support.html` bleiben private Laufzeit-Abhängigkeiten.
 - Die Overlay-Rückgabe enthält `dialoguePresentation` mit den vorgesehenen Gold-/Kontrastwerten. Ein Renderer muss diese Metadaten auf den Dialogblock anwenden.
 
 Auch Phase 8 verändert keine privaten Tabellenwerte und benötigt keine Migration.
