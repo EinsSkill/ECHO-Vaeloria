@@ -116,3 +116,13 @@ Phase 7 ergänzt den autoritativen Ereignis- und Zustandsabgleich:
 - GET?action=commit-reconciliation-contract und die Gateway-Operation commit-reconciliation-contract liefern den technischen Vertrag.
 
 Auch Phase 7 verändert keine privaten Tabellenwerte und benötigt keine zusätzliche Migration. Beim späteren Sammel-Import genügt weiterhin die konsolidierte apps-script/Code.gs.
+
+
+## Phase 8: schnellere Verarbeitung und Dialog-Präsentationsvertrag
+
+- Neue Züge fordern nach dem Schreiben einen einmaligen Processor-Wake an; der bestehende Minuten-Trigger bleibt als Fallback erhalten.
+- Der Fast Turn Gateway liest den neuesten Inbox-Eintrag jetzt mit einem gebündelten Tabellen-Read statt mit einem zusätzlichen Range-Read pro Zeile.
+- Overlay-Blöcke vom Typ `dialogue` erhalten zusätzlich `cssClass: "echo-dialogue"`, `className` und `presentation.style_key: "dialogue-gold"`. Die Darstellung bleibt eine Aufgabe des privaten Overlay-Renderers; private HTML- oder Story-Inhalte werden nicht ins Repository übernommen.
+- Die Overlay-Rückgabe enthält `dialoguePresentation` mit den vorgesehenen Gold-/Kontrastwerten. Ein Renderer muss diese Metadaten auf den Dialogblock anwenden.
+
+Auch Phase 8 verändert keine privaten Tabellenwerte und benötigt keine Migration.
