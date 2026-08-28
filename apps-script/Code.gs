@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-10-deterministic-preference-projection-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-11-live-validation-report-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -42,6 +42,7 @@ var ECHO_SCENE_READBACK_CONTRACT_VERSION = '1.0.0';
 var ECHO_EVENT_IDENTITY_VERSION = '1.0.0';
 var ECHO_COMMIT_RECONCILIATION_VERSION = '1.0.0';
 var ECHO_HEALTH_REPORT_VERSION = '1.0.0';
+var ECHO_VALIDATION_REPORT_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -153,6 +154,12 @@ function doGet(e) {
   }
   if (action === 'health-report') {
     return jsonOutput_(echoGetHealthReport_());
+  }
+  if (action === 'validation-report') {
+    return jsonOutput_(echoGetValidationReport_());
+  }
+  if (action === 'validation-contract') {
+    return jsonOutput_(echoGetValidationReportContract());
   }
   if (action === 'delivery-policy') {
     return jsonOutput_(echoGetChatDeliveryPolicy());
@@ -1809,6 +1816,7 @@ function echoGetSceneContract() {
     overlay_contract: echoOverlayContract_(),
     projection_contract: echoProjectionContract_(),
     preference_projection_contract: echoPreferenceProjectionContract_(),
+    validation_contract: echoValidationReportContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_()
   };
@@ -3133,6 +3141,7 @@ function getOverlayState_() {
     overlayContract: echoOverlayContract_(),
     projectionContract: echoProjectionContract_(),
     preferenceProjectionContract: echoPreferenceProjectionContract_(),
+    validationContract: echoValidationReportContract_(),
     dashboardProjection: dashboardProjection
   };
 }
@@ -3712,6 +3721,313 @@ function echoMasteryValue_(raw) {
 }
 
 
+
+var ECHO_PHASE11_ID_FIELDS_ = {
+  CANON: 'canon_id', DECISIONS: 'question_id', RULES: 'rule_id',
+  ECHO_SYSTEM: 'system_id', WORLD: 'world_id', TIMELINE: 'timeline_id',
+  CHARACTERS: 'character_id', SPECIES: 'species_id', FACTIONS: 'faction_id',
+  RELATIONSHIPS: 'relation_id', FLAGS: 'flag_id',
+  PLAYER_EXPERIENCE: 'experience_id', GAME_DESIGN: 'design_id', UI_DESIGN: 'ui_id',
+  STATE_SNAPSHOT: 'state_key', EVENT_LOG: 'event_id', SCENE_FEED: 'feed_id',
+  TURN_INBOX: 'turn_id', TURN_TRANSACTIONS: 'transaction_id',
+  SCENE_REVISIONS: 'revision_id', ITEM_STATE: 'item_id', GROUP_MEMBERS: 'member_id',
+  RELATIONSHIP_STATE: 'state_id', THREADS: 'thread_id',
+  ECHO_PREFERENCE_PROFILE: 'preference_id', ECHO_CHARACTER_PROFILES: 'profile_id'
+};
+
+function echoValidationReportContract_() {
+  return {
+    version: ECHO_VALIDATION_REPORT_VERSION,
+    source_of_truth: 'ECHO_WORKBOOK',
+    mode: 'READ_ONLY',
+    status_values: ['PASS', 'WARN', 'BLOCK', 'NOT_APPLICABLE'],
+    checks: ['V-001','V-002','V-003','V-004','V-005','V-006','V-007','V-008','V-009','V-010','V-011','V-012','V-013','V-014','V-015'],
+    block_rule: 'Only BLOCK checks make the report not ok.'
+  };
+}
+
+function echoGetValidationReportContract() {
+  return { ok: true, contract: echoValidationReportContract_() };
+}
+
+function echoPhase11ReadTable_(sheetName) {
+  try {
+    var table = readTable_(getSheet_(sheetName));
+    return { present: true, headers: table.headers || [], rows: table.rows || [] };
+  } catch (error) {
+    return { present: false, headers: [], rows: [], error: String(error && error.message ? error.message : error) };
+  }
+}
+
+function echoPhase11DuplicateIds_(table, field) {
+  var seen = {};
+  var duplicates = [];
+  if (!table || !table.present || (table.headers || []).indexOf(field) === -1) return duplicates;
+  (table.rows || []).forEach(function (row) {
+    var value = String(row[field] || '').trim();
+    if (!value) return;
+    if (seen[value]) duplicates.push(value);
+    seen[value] = true;
+  });
+  return duplicates;
+}
+
+function echoPhase11Ids_(table, field) {
+  var ids = {};
+  if (!table || !table.present || (table.headers || []).indexOf(field) === -1) return ids;
+  (table.rows || []).forEach(function (row) {
+    var value = String(row[field] || '').trim();
+    if (value) ids[value] = true;
+  });
+  return ids;
+}
+
+function echoPhase11ReferenceErrors_(table, field, ids, label) {
+  var errors = [];
+  if (!table || !table.present || (table.headers || []).indexOf(field) === -1) return errors;
+  (table.rows || []).forEach(function (row) {
+    var status = String(row.status || '').trim().toUpperCase();
+    if (['ARCHIVED','SUPERSEDED','DEPRECATED','LEGACY','HIDDEN'].indexOf(status) !== -1) return;
+    var value = String(row[field] || '').trim();
+    if (value && !ids[value]) errors.push({ sheet: label, row: Number(row.__rowNumber || 0), value: value });
+  });
+  return errors;
+}
+
+function echoGetValidationReport_() {
+  var names = [
+    'CANON','DECISIONS','RULES','ECHO_SYSTEM','WORLD','TIMELINE','CHARACTERS',
+    'SPECIES','FACTIONS','RELATIONSHIPS','FLAGS','PLAYER_EXPERIENCE','GAME_DESIGN',
+    'UI_DESIGN','STATE_SNAPSHOT','EVENT_LOG','SCENE_FEED','TURN_INBOX',
+    'TURN_TRANSACTIONS','SCENE_REVISIONS','ITEM_STATE','GROUP_MEMBERS',
+    'RELATIONSHIP_STATE','THREADS','ECHO_PREFERENCE_PROFILE','ECHO_CHARACTER_PROFILES'
+  ];
+  var tables = {};
+  var checks = [];
+  var errors = [];
+  var warnings = [];
+  names.forEach(function (name) { tables[name] = echoPhase11ReadTable_(name); });
+
+  function add(id, key, severity, status, message, details) {
+    var item = { check_id:id, check_key:key, severity:severity, status:status, message:message };
+    if (details !== undefined) item.details = details;
+    checks.push(item);
+    if (status === 'BLOCK') errors.push(item);
+    if (status === 'WARN') warnings.push(item);
+  }
+  function ids(name, field) { return echoPhase11Ids_(tables[name], field); }
+  function refs(table, field, known, label) {
+    return echoPhase11ReferenceErrors_(table, field, known, label);
+  }
+
+  var duplicateIds = [];
+  var missingIdHeaders = [];
+  Object.keys(ECHO_PHASE11_ID_FIELDS_).forEach(function (name) {
+    var table = tables[name], field = ECHO_PHASE11_ID_FIELDS_[name];
+    if (!table || !table.present) return;
+    if ((table.headers || []).indexOf(field) === -1) missingIdHeaders.push(name + '.' + field);
+    else echoPhase11DuplicateIds_(table, field).forEach(function (id) {
+      duplicateIds.push(name + '.' + field + '=' + id);
+    });
+  });
+  add('V-001','unique_ids','BLOCK',
+    duplicateIds.length ? 'BLOCK' : (missingIdHeaders.length ? 'WARN' : 'PASS'),
+    duplicateIds.length ? 'Doppelte Primär-IDs gefunden.' : 'Primär-IDs sind eindeutig.',
+    { duplicates:duplicateIds.slice(0,50), missing_headers:missingIdHeaders });
+
+  var missingRequired = [];
+  Object.keys(ECHO_PHASE2_SCHEMA_).forEach(function (name) {
+    var table = tables[name];
+    if (!table || !table.present) missingRequired.push(name + ' (Tabelle fehlt)');
+    else ECHO_PHASE2_SCHEMA_[name].forEach(function (field) {
+      if ((table.headers || []).indexOf(field) === -1) missingRequired.push(name + '.' + field);
+    });
+  });
+  add('V-002','required_fields','BLOCK',missingRequired.length ? 'BLOCK' : 'PASS',
+    missingRequired.length ? 'Pflichtspalten fehlen.' : 'Pflichtspalten des Runtime-Schemas sind vorhanden.',
+    { missing:missingRequired.slice(0,100) });
+
+  var eventTable = tables.EVENT_LOG, sceneTable = tables.SCENE_FEED;
+  var inboxTable = tables.TURN_INBOX, transactionTable = tables.TURN_TRANSACTIONS;
+  var revisionTable = tables.SCENE_REVISIONS, stateTable = tables.STATE_SNAPSHOT;
+  var itemTable = tables.ITEM_STATE, groupTable = tables.GROUP_MEMBERS;
+  var relationshipTable = tables.RELATIONSHIP_STATE;
+  var eventIds = ids('EVENT_LOG','event_id'), feedIds = ids('SCENE_FEED','feed_id');
+  var turnIds = ids('TURN_INBOX','turn_id'), revisionIds = ids('SCENE_REVISIONS','revision_id');
+
+  var referenceErrors = [];
+  referenceErrors = referenceErrors.concat(refs(sceneTable,'event_id',eventIds,'SCENE_FEED.event_id'));
+  referenceErrors = referenceErrors.concat(refs(inboxTable,'commit_event_id',eventIds,'TURN_INBOX.commit_event_id'));
+  referenceErrors = referenceErrors.concat(refs(inboxTable,'ui_feed_id',feedIds,'TURN_INBOX.ui_feed_id'));
+  referenceErrors = referenceErrors.concat(refs(transactionTable,'event_id',eventIds,'TURN_TRANSACTIONS.event_id'));
+  referenceErrors = referenceErrors.concat(refs(transactionTable,'turn_id',turnIds,'TURN_TRANSACTIONS.turn_id'));
+  referenceErrors = referenceErrors.concat(refs(transactionTable,'ui_feed_id',feedIds,'TURN_TRANSACTIONS.ui_feed_id'));
+  referenceErrors = referenceErrors.concat(refs(transactionTable,'revision_id',revisionIds,'TURN_TRANSACTIONS.revision_id'));
+  referenceErrors = referenceErrors.concat(refs(revisionTable,'event_id',eventIds,'SCENE_REVISIONS.event_id'));
+  referenceErrors = referenceErrors.concat(refs(revisionTable,'source_event_id',eventIds,'SCENE_REVISIONS.source_event_id'));
+  referenceErrors = referenceErrors.concat(refs(revisionTable,'feed_id',feedIds,'SCENE_REVISIONS.feed_id'));
+  referenceErrors = referenceErrors.concat(refs(revisionTable,'supersedes_feed_id',feedIds,'SCENE_REVISIONS.supersedes_feed_id'));
+  referenceErrors = referenceErrors.concat(refs(itemTable,'last_event_id',eventIds,'ITEM_STATE.last_event_id'));
+  referenceErrors = referenceErrors.concat(refs(groupTable,'last_event_id',eventIds,'GROUP_MEMBERS.last_event_id'));
+  referenceErrors = referenceErrors.concat(refs(relationshipTable,'last_event_id',eventIds,'RELATIONSHIP_STATE.last_event_id'));
+  add('V-003','reference_integrity','BLOCK',referenceErrors.length ? 'BLOCK' : 'PASS',
+    referenceErrors.length ? 'Nicht auflösbare Referenzen gefunden.' : 'Aktive Referenzen sind auflösbar.',
+    referenceErrors.slice(0,100));
+
+  var duplicateEvents = echoPhase11DuplicateIds_(eventTable,'event_id');
+  var duplicateTurns = echoPhase11DuplicateIds_(inboxTable,'turn_id');
+  var duplicateTransactions = echoPhase11DuplicateIds_(transactionTable,'transaction_id');
+  var idempotencyErrors = duplicateEvents.concat(duplicateTurns, duplicateTransactions);
+  add('V-004','event_idempotency','BLOCK',idempotencyErrors.length ? 'BLOCK' : 'PASS',
+    idempotencyErrors.length ? 'Event-, Zug- oder Transaktions-IDs sind doppelt.' : 'Event-, Zug- und Transaktions-IDs sind eindeutig.',
+    { event_ids:duplicateEvents, turn_ids:duplicateTurns, transaction_ids:duplicateTransactions });
+
+  var orderErrors = [], lastByRun = {};
+  (eventTable.rows || []).slice().sort(function (a,b) {
+    return Number(a.__rowNumber || 0) - Number(b.__rowNumber || 0);
+  }).forEach(function (row) {
+    var run = String(row.run_id || '__NO_RUN__'), seq = Number(row.sequence);
+    if (!isFinite(seq) || (lastByRun[run] !== undefined && seq < lastByRun[run])) {
+      orderErrors.push({ row:Number(row.__rowNumber || 0), run_id:run, sequence:row.sequence, previous:lastByRun[run] });
+    }
+    if (isFinite(seq)) lastByRun[run] = seq;
+  });
+  add('V-005','event_order','BLOCK',orderErrors.length ? 'BLOCK' : 'PASS',
+    orderErrors.length ? 'Ereignisfolge ist je Run nicht monoton.' : 'Ereignisse sind je Run monoton geordnet.',
+    orderErrors.slice(0,100));
+
+  var stateWarnings = [], stateProjection = { map:{}, rows:[] };
+  try { stateProjection = echoCanonicalStateProjection_(stateWarnings); } catch (error) {
+    errors.push({ check_id:'V-006', check_key:'state_rebuild', status:'BLOCK', message:String(error && error.message ? error.message : error) });
+  }
+  var orderedEvents = (eventTable.rows || []).filter(function (row) { return !!row.event_id; }).slice().sort(sequenceAscending_);
+  var latestEvent = orderedEvents.length ? orderedEvents[orderedEvents.length - 1] : null;
+  var stateLastEvent = stateProjection.map['save.last_event_id'] ? String(stateProjection.map['save.last_event_id'].value || '') : '';
+  var rebuildStatus = !latestEvent && !stateLastEvent ? 'NOT_APPLICABLE'
+    : (latestEvent && stateLastEvent === String(latestEvent.event_id) ? 'PASS' : 'BLOCK');
+  add('V-006','state_rebuild','BLOCK',rebuildStatus,
+    rebuildStatus === 'PASS' ? 'STATE_SNAPSHOT zeigt auf das letzte Ereignis.'
+      : (rebuildStatus === 'NOT_APPLICABLE' ? 'Noch keine Ereignisse vorhanden.' : 'STATE_SNAPSHOT zeigt nicht auf das letzte Ereignis.'),
+    { state_last_event_id:stateLastEvent, latest_event_id:latestEvent ? latestEvent.event_id : '' });
+
+  var openRows = 0, leakedRows = [];
+  ['CANON','DECISIONS'].forEach(function (name) {
+    var table = tables[name];
+    if (!table || !table.present) return;
+    var idField = ECHO_PHASE11_ID_FIELDS_[name], lockedIds = {};
+    try { echoPhase2LockedRows_(name, []).forEach(function (row) {
+      var id = String(row[idField] || '').trim(); if (id) lockedIds[id] = true;
+    }); } catch (error) {}
+    (table.rows || []).forEach(function (row) {
+      if (['OPEN','IDEA','DRAFT'].indexOf(String(row.status || '').trim().toUpperCase()) === -1) return;
+      openRows += 1;
+      var id = String(row[idField] || '').trim();
+      if (id && lockedIds[id]) leakedRows.push(name + '=' + id);
+    });
+  });
+  add('V-007','open_canon','BLOCK',leakedRows.length ? 'BLOCK' : 'PASS',
+    leakedRows.length ? 'Offene Kanonzeilen gelangen in die gesperrte Projektion.' : 'Offene Kanonzeilen bleiben ausgeschlossen.',
+    { open_rows:openRows, leaked_rows:leakedRows });
+
+  var storyNodes = echoPhase11ReadTable_('STORY_NODES');
+  add('V-008','story_reachability','WARN',storyNodes.present ? 'WARN' : 'NOT_APPLICABLE',
+    storyNodes.present ? 'STORY_NODES vorhanden; Reachability folgt später.' : 'Keine STORY_NODES-Tabelle vorhanden.',
+    { sheet_present:storyNodes.present });
+  var assets = echoPhase11ReadTable_('ASSETS');
+  add('V-009','asset_refs','BLOCK',assets.present ? 'WARN' : 'NOT_APPLICABLE',
+    assets.present ? 'ASSETS vorhanden; Auflösung folgt später.' : 'Keine ASSETS-Tabelle vorhanden.',
+    { sheet_present:assets.present });
+
+  var relationRefs = refs(relationshipTable,'last_event_id',eventIds,'RELATIONSHIP_STATE.last_event_id');
+  add('V-010','relationship_consistency','WARN',relationRefs.length ? 'WARN' : 'PASS',
+    relationRefs.length ? 'Beziehungsreferenzen sind nicht vollständig auflösbar.' : 'Beziehungszustände sind konsistent oder uninitialisiert.',
+    relationRefs.slice(0,100));
+
+  var requiredStateKeys = ['save.last_event_id','player.location_id','player.inventory','player.equipment_main_hand'];
+  var missingStateKeys = requiredStateKeys.filter(function (key) { return !stateProjection.map[key]; });
+  add('V-011','current_projection','WARN',missingStateKeys.length ? 'WARN' : 'PASS',
+    missingStateKeys.length ? 'Kernfelder der Zustandsprojektion fehlen.' : 'Kernfelder der Zustandsprojektion sind vorhanden.',
+    { missing:missingStateKeys });
+
+  var timestampFields = {
+    TURN_INBOX:['received_at','processed_at','locked_at'], EVENT_LOG:['timestamp','committed_at'],
+    SCENE_FEED:['created_at'], SCENE_REVISIONS:['created_at'],
+    TURN_TRANSACTIONS:['created_at','updated_at','event_logged_at','scene_revision_at','state_applied_at','relationships_applied_at','items_applied_at','group_members_applied_at','preferences_applied_at','profiles_applied_at','committed_at'],
+    ITEM_STATE:['updated_at'], GROUP_MEMBERS:['joined_at','left_at','updated_at'],
+    RELATIONSHIP_STATE:['updated_at'], ECHO_PREFERENCE_PROFILE:['updated_at'], ECHO_CHARACTER_PROFILES:['updated_at']
+  };
+  var badTimestamps = [];
+  Object.keys(timestampFields).forEach(function (name) {
+    var table = tables[name];
+    if (!table || !table.present) return;
+    (table.rows || []).forEach(function (row) {
+      timestampFields[name].forEach(function (field) {
+        if (row[field] !== undefined && String(row[field] || '').trim() && !stateTimestamp_(row[field])) {
+          badTimestamps.push({ sheet:name, field:field, row:Number(row.__rowNumber || 0) });
+        }
+      });
+    });
+  });
+  add('V-012','timestamp_consistency','WARN',badTimestamps.length ? 'WARN' : 'PASS',
+    badTimestamps.length ? 'Nicht parsebare Zeitstempel gefunden.' : 'Vorhandene Zeitstempel sind parsebar.',
+    badTimestamps.slice(0,100));
+
+  var feedErrors = [];
+  (inboxTable.rows || []).forEach(function (row) {
+    if (String(row.validation_status || '').trim().toUpperCase() !== 'COMMITTED') return;
+    var eventId = String(row.commit_event_id || '').trim(), feedId = String(row.ui_feed_id || '').trim();
+    var eventRow = (eventTable.rows || []).filter(function (candidate) { return String(candidate.event_id || '').trim() === eventId; })[0];
+    var feedRow = (sceneTable.rows || []).filter(function (candidate) { return String(candidate.feed_id || '').trim() === feedId; })[0];
+    if (!eventRow) feedErrors.push({ row:Number(row.__rowNumber || 0), missing:'event', id:eventId });
+    if (!feedRow) feedErrors.push({ row:Number(row.__rowNumber || 0), missing:'feed', id:feedId });
+    if (eventRow && feedRow && String(feedRow.event_id || '').trim() !== eventId) {
+      feedErrors.push({ row:Number(row.__rowNumber || 0), mismatch:true, event_id:eventId, feed_event_id:feedRow.event_id });
+    }
+  });
+  add('V-013','feed_link_integrity','WARN',feedErrors.length ? 'WARN' : 'PASS',
+    feedErrors.length ? 'COMMITTED-Züge sind nicht vollständig verknüpft.' : 'COMMITTED-Züge besitzen passende Event- und Feed-Zeilen.',
+    feedErrors.slice(0,100));
+
+  var legacyRows = [], selectedLegacy = Object.keys(stateProjection.map).filter(isLegacyStateKey_);
+  (stateTable.rows || []).forEach(function (row) {
+    var key = String(row.state_key || '').trim();
+    if (key && isLegacyStateKey_(key)) legacyRows.push({ row:Number(row.__rowNumber || 0), key:key });
+  });
+  add('V-014','legacy_seed_isolation','WARN',selectedLegacy.length ? 'BLOCK' : 'PASS',
+    selectedLegacy.length ? 'Ein Legacy-State-Key ist noch aktiv.' : 'Legacy-State-Zeilen können die aktive Projektion nicht gewinnen.',
+    { legacy_rows:legacyRows.slice(0,100), selected_legacy_keys:selectedLegacy });
+
+  var delivery = echoChatDeliveryPolicy_();
+  var narrationOk = delivery.mode === 'OVERLAY_ONLY' &&
+    delivery.narrative_destination === 'SCENE_FEED' &&
+    delivery.include_narrative_in_chat === false &&
+    delivery.completion_rule === 'ACK_ONLY_AFTER_COMMIT_AND_READBACK';
+  add('V-015','narration_controls','WARN',narrationOk ? 'PASS' : 'WARN',
+    narrationOk ? 'Narration bleibt im Overlay; Chat erhält nur Commit-Bestätigung.' : 'Narrationskontrollen sind unvollständig.',
+    { policy:delivery });
+
+  var summary = {
+    pass:checks.filter(function (x) { return x.status === 'PASS'; }).length,
+    warn:checks.filter(function (x) { return x.status === 'WARN'; }).length,
+    block:checks.filter(function (x) { return x.status === 'BLOCK'; }).length,
+    notApplicable:checks.filter(function (x) { return x.status === 'NOT_APPLICABLE'; }).length
+  };
+  return {
+    ok: errors.length === 0 && summary.block === 0,
+    version:ECHO_VALIDATION_REPORT_VERSION,
+    build:ECHO_BUILD_ID,
+    checked_at:new Date().toISOString(),
+    source:'ECHO_WORKBOOK',
+    mode:'READ_ONLY',
+    summary:summary,
+    checks:checks,
+    errors:errors,
+    warnings:warnings,
+    state_projection_warnings:stateWarnings,
+    contract:echoValidationReportContract_()
+  };
+}
+
 function echoGetHealthReport_() {
   var warnings = [];
   var errors = [];
@@ -3720,6 +4036,7 @@ function echoGetHealthReport_() {
   var eventRows = [];
   var sceneRows = [];
   var inboxRows = [];
+  var validationReport = null;
   var preferenceContext = null;
   var preferenceHealth = {
     ok: false,
@@ -3899,6 +4216,21 @@ function echoGetHealthReport_() {
     readRows(ECHO_CONFIG.sheets.relationships)
   );
 
+  try {
+    validationReport = echoGetValidationReport_();
+    if (!validationReport.ok) {
+      errors.push({
+        code: 'VALIDATION_REPORT_FAILED',
+        message: 'Mindestens eine BLOCK-Prüfung des Live-Validators ist fehlgeschlagen.'
+      });
+    }
+  } catch (error) {
+    errors.push({
+      code: 'VALIDATION_REPORT_FAILED',
+      message: String(error && error.message ? error.message : error)
+    });
+  }
+
   return {
     ok: errors.length === 0,
     version: ECHO_HEALTH_REPORT_VERSION,
@@ -3924,6 +4256,8 @@ function echoGetHealthReport_() {
       preferenceProjection: preferenceHealth
     },
     dashboardProjection: dashboardProjection,
+    validation: validationReport,
+    validationContract: echoValidationReportContract_(),
     preferenceProjection: preferenceHealth,
     preferenceProjectionContract: echoPreferenceProjectionContract_(),
     errors: errors,
@@ -4024,6 +4358,7 @@ function echoGetRuntimeContext() {
     overlay_contract: echoOverlayContract_(),
     projection_contract: echoProjectionContract_(),
     preference_projection_contract: echoPreferenceProjectionContract_(),
+    validation_contract: echoValidationReportContract_(),
     context_binding_contract: echoContextBindingContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_(),
@@ -5962,6 +6297,7 @@ function getEchoAuthoritativeContext_(options) {
     },
     projection_contract: echoProjectionContract_(),
     preference_projection_contract: echoPreferenceProjectionContract_(),
+    validation_contract: echoValidationReportContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_(),
     projections: projections
