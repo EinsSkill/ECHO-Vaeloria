@@ -1,19 +1,7 @@
-/*
- * Public, secret-free ECHO overlay configuration.
- * The deployed Web App URL is injected by Apps Script through Index.html.
- * Private workbook IDs, tokens and live story data stay in Script Properties
- * and the private workbook.
- */
 window.ECHO_PROJECT = {
   readOnly: true,
   inputChannel: 'chatgpt',
   readEndpoint: (window.ECHO_WEB_APP_URL || window.location.href.split('?')[0]) + '?action=state',
   refreshMs: 5000,
-  demoSnapshot: null,
-  sync: {
-    singleFlight: true,
-    retainLastValidSnapshot: true,
-    staleResponseGuard: true,
-    noStoreReads: true
-  }
+  demoSnapshot: null
 };
