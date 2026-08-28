@@ -1,0 +1,7 @@
+window.ECHO_PROJECT = {
+  readOnly: true,
+  inputChannel: 'chatgpt',
+  readEndpoint: (window.ECHO_WEB_APP_URL || window.location.href.split('?')[0]) + '?action=state',
+  refreshMs: 5000,
+  demoSnapshot: null
+};

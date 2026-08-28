@@ -464,6 +464,9 @@ class Component extends DCLogic {
     speechVoiceName: '',
     speechVoices: [],
     speechSceneKey: '',
+    lastAppliedSequence: 0,
+    lastAppliedSceneKey: '',
+    syncError: '',
     player: {
       name: 'Namenlos', species: 'unbekannt', tags: ['Keine Erinnerung', 'Erschöpft', 'ECHO instabil'],
       health: null, healthDescription: 'Spürbar, aber unklar — Zustand unbestimmt.'
@@ -499,6 +502,9 @@ class Component extends DCLogic {
     if (this._mq.addEventListener) this._mq.addEventListener('change', this._mqHandler);
     this._onResize = () => this.setState({ vw: window.innerWidth });
     window.addEventListener('resize', this._onResize);
+    this._mounted = true;
+    this._syncInFlight = false;
+    this._syncQueued = false;
     this.initSpeech();
     this.syncFromProject();
     const refreshMs = Number(window.ECHO_PROJECT?.refreshMs || 0);
@@ -508,6 +514,7 @@ class Component extends DCLogic {
   }
 
   componentWillUnmount() {
+    this._mounted = false;
     if (this._mq && this._mqHandler && this._mq.removeEventListener) this._mq.removeEventListener('change', this._mqHandler);
     if (this._onResize) window.removeEventListener('resize', this._onResize);
     if (this._syncTimer) clearInterval(this._syncTimer);
@@ -632,48 +639,137 @@ class Component extends DCLogic {
   }
 
   applyProjectSnapshot(snapshot, source) {
-    if (!snapshot || typeof snapshot !== 'object') return;
-    const data = snapshot.state || snapshot;
-    const allowedKeys = ['activeFolio', 'currentScene', 'sceneActions', 'chronicle', 'relationships', 'threads', 'inventory', 'knownFacts', 'mapRegions', 'chapters', 'selectedMapRegion', 'player', 'stateSummary'];
+    if (!snapshot || typeof snapshot !== 'object') return false;
+    if (snapshot.ok === false && !snapshot.currentScene && !snapshot.state) {
+      this.handleSyncError(snapshot);
+      return false;
+    }
+
+    const data = snapshot.state && typeof snapshot.state === 'object'
+      ? snapshot.state
+      : snapshot;
+    const incomingScene = data.currentScene && typeof data.currentScene === 'object'
+      ? data.currentScene
+      : {};
+    const incomingSequence = Number(
+      incomingScene.sequence !== undefined
+        ? incomingScene.sequence
+        : (data.sequence !== undefined ? data.sequence : 0)
+    ) || 0;
+    const currentSequence = Number(this.state.lastAppliedSequence || 0) || 0;
+    const incomingKey = String(
+      data.lastFeedId ||
+      data.lastEventId ||
+      incomingScene.feedId ||
+      incomingScene.feed_id ||
+      ((incomingScene.title || '') + '|' + (incomingScene.text || incomingScene.narrativeText || ''))
+    );
+
+    // A slower response must never overwrite a newer scene that has already
+    // reached the browser.
+    if (source === 'remote' && currentSequence > 0 && incomingSequence > 0 && incomingSequence < currentSequence) {
+      return false;
+    }
+    if (source === 'remote' &&
+        incomingSequence === currentSequence &&
+        incomingKey &&
+        incomingKey === this.state.lastAppliedSceneKey) {
+      this.setState({ syncSource: 'remote', saveStatus: 'synced', syncError: '' });
+      return false;
+    }
+
+    const allowedKeys = [
+      'activeFolio', 'currentScene', 'sceneActions', 'chronicle', 'relationships',
+      'relationshipProfiles', 'threads', 'inventory', 'knownFacts', 'mapRegions',
+      'chapters', 'selectedMapRegion', 'player', 'stateSummary', 'groupMembers',
+      'projections', 'worldProjection', 'characterProjections', 'groupProjections',
+      'relationshipProjections', 'characters', 'groups'
+    ];
     const next = {};
     allowedKeys.forEach((key) => {
       if (data[key] !== undefined) next[key] = data[key];
     });
     if (data.echoMastery !== undefined) next.echoMasteryPreview = data.echoMastery;
     if (data.lastConsequence !== undefined) next.lastConsequence = data.lastConsequence;
-    const sceneKey = String(data.lastFeedId || data.lastEventId || ((data.currentScene || {}).title || '') + '|' + ((data.currentScene || {}).text || ''));
-    const isNewScene = !!sceneKey && sceneKey !== this.state.speechSceneKey;
+    next.lastAppliedSequence = Math.max(currentSequence, incomingSequence);
+    next.lastAppliedSceneKey = incomingKey || this.state.lastAppliedSceneKey;
+    next.syncError = '';
+
+    const isNewScene = !!incomingKey && incomingKey !== this.state.speechSceneKey;
     const shouldAutoSpeak = source === 'remote' && isNewScene && this.state.speechAuto && this.state.speechUserActivated;
-    this.setState({ ...next, speechSceneKey: sceneKey, syncSource: source, saveStatus: 'synced' }, () => {
+    this.setState({ ...next, speechSceneKey: incomingKey, syncSource: source, saveStatus: 'synced' }, () => {
       if (shouldAutoSpeak) this.speakCurrentScene();
     });
+    return true;
   }
 
   async syncFromProject() {
-    const project = window.ECHO_PROJECT || {};
-    if (project.demoSnapshot) this.applyProjectSnapshot(project.demoSnapshot, 'demo');
-    const appsScriptRun = window.google && window.google.script && window.google.script.run;
-    if (appsScriptRun) {
-      appsScriptRun
-        .withSuccessHandler((payload) => this.applyProjectSnapshot(payload.snapshot || payload.data || payload, 'remote'))
-        .withFailureHandler((error) => this.handleSyncError(error))
-        .getOverlayStateForClient();
+    if (this._syncInFlight) {
+      this._syncQueued = true;
       return;
     }
-    if (!project.readEndpoint || typeof fetch !== 'function') return;
+    this._syncInFlight = true;
+
+    const project = window.ECHO_PROJECT || {};
+    if (project.demoSnapshot && !this._demoSnapshotApplied) {
+      this._demoSnapshotApplied = true;
+      this.applyProjectSnapshot(project.demoSnapshot, 'demo');
+    }
+
     try {
-      const response = await fetch(project.readEndpoint, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      const payload = await response.json();
-      this.applyProjectSnapshot(payload.snapshot || payload.data || payload, 'remote');
+      const appsScriptRun = window.google && window.google.script && window.google.script.run;
+      let payload;
+
+      if (appsScriptRun) {
+        payload = await new Promise((resolve, reject) => {
+          appsScriptRun
+            .withSuccessHandler(resolve)
+            .withFailureHandler(reject)
+            .getOverlayStateForClient();
+        });
+      } else {
+        if (!project.readEndpoint || typeof fetch !== 'function') return;
+        const response = await fetch(project.readEndpoint, {
+          headers: { Accept: 'application/json' },
+          cache: 'no-store'
+        });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        payload = await response.json();
+      }
+
+      const snapshot = payload && (payload.snapshot || payload.data || payload);
+      if (!snapshot || snapshot.ok === false) {
+        throw new Error(
+          (snapshot && snapshot.error && snapshot.error.message) ||
+          'ECHO state response was not valid.'
+        );
+      }
+      this.applyProjectSnapshot(snapshot, 'remote');
     } catch (error) {
       this.handleSyncError(error);
+    } finally {
+      this._syncInFlight = false;
+      if (this._mounted && this._syncQueued) {
+        this._syncQueued = false;
+        window.setTimeout(() => this.syncFromProject(), 0);
+      }
     }
   }
 
   handleSyncError(error) {
+    const message = String(
+      error && error.message
+        ? error.message
+        : (error && error.error && error.error.message ? error.error.message : error || 'Unbekannter Synchronisationsfehler')
+    ).slice(0, 240);
     console.warn('[ECHO overlay] Read-only sync failed:', error);
-    this.setState((s) => ({ saveStatus: s.syncSource === 'remote' ? 'needs_confirmation' : 'unavailable', syncSource: 'unavailable' }));
+    this.setState((s) => ({
+      saveStatus: s.currentScene && (s.currentScene.text || s.currentScene.narrativeText)
+        ? 'needs_confirmation'
+        : 'unavailable',
+      syncSource: 'unavailable',
+      syncError: message
+    }));
   }
 
   renderVals() {
@@ -694,7 +790,7 @@ class Component extends DCLogic {
       loading: { label: 'Spielstand wird geladen …', dot: '#C9A227' },
       synced: { label: s.syncSource === 'demo' ? 'Beispieldaten geladen' : 'Chronik gesichert', dot: '#6E9A7D' },
       processing: { label: 'Wird niedergeschrieben …', dot: '#C9A227' },
-      needs_confirmation: { label: 'Bestätigung erforderlich', dot: '#C9A227' },
+      needs_confirmation: { label: 'Verbindung unterbrochen — letzte Szene bleibt', dot: '#C9A227' },
       conflict: { label: 'Zeitlinien-Konflikt', dot: '#7A3226' },
       unavailable: { label: 'Chronik nicht erreichbar', dot: '#7A3226' }
     };
@@ -737,30 +833,48 @@ class Component extends DCLogic {
 
     const currentScene = s.currentScene || {};
     const sceneText = currentScene.text || currentScene.narrativeText || '';
-    const sceneBlocks = sceneText
-      .split(/\n\s*\n/)
-      .map((text) => text.replace(/\s*\n\s*/g, ' ').trim())
-      .filter(Boolean)
-      .map((text, index) => {
-        // Only direct speech receives the gold treatment. Narrative text
-        // between dialogue lines must remain on the normal page background.
-        const isDialogue = /^(?:[^:\n]{1,80}:\s*)?(?:„|"|“|«|—|–)\s*/.test(text);
-        const isEmphasis = /^(Kälte\.|Ein Echo\.)$/.test(text);
-        return {
-          text,
-          style: {
-            fontFamily: "'Lora',serif",
-            fontSize: isDialogue ? '17px' : '18px',
-            lineHeight: '1.78',
-            margin: index === 0 ? '0 0 21px' : '0 0 21px',
-            padding: isDialogue ? '12px 16px' : '0',
-            background: isDialogue ? 'rgba(201,162,39,0.14)' : 'transparent',
-            borderLeft: isDialogue ? '2px solid rgba(201,162,39,0.75)' : 'none',
-            fontStyle: isEmphasis ? 'italic' : 'normal',
-            color: isEmphasis ? '#6B581E' : '#26221B'
-          }
-        };
-      });
+    const serverBlocks = Array.isArray(currentScene.blocks) ? currentScene.blocks : [];
+    const rawSceneBlocks = serverBlocks.length
+      ? serverBlocks.map((block) => {
+          const type = String(block && block.type || 'prose').toLowerCase();
+          const rawText = String(block && (block.text !== undefined ? block.text : block.content) || '').trim();
+          const speaker = String(block && (block.speaker || block.character_id) || '').trim();
+          const dialogueText = rawText.replace(/^[„"“«]+|[“"”»]+$/g, '').trim();
+          return {
+            type,
+            text: type === 'dialogue'
+              ? (speaker ? speaker + ': „' + dialogueText + '“' : '„' + dialogueText + '“')
+              : rawText,
+            isDialogue: type === 'dialogue',
+            isEmphasis: type === 'sensory' && /^(Kälte\.|Ein Echo\.)$/.test(rawText)
+          };
+        }).filter((block) => !!block.text)
+      : sceneText
+          .split(/\n\s*\n/)
+          .map((text) => text.replace(/\s*\n\s*/g, ' ').trim())
+          .filter(Boolean)
+          .map((text) => ({
+            type: 'legacy',
+            text,
+            // Legacy scenes have no reliable metadata; only an unmistakable
+            // spoken-line prefix receives the dialogue style.
+            isDialogue: /^(?:[^:\n]{1,80}:\s*)?(?:„|"|“|«|—|–)\s*/.test(text),
+            isEmphasis: /^(Kälte\.|Ein Echo\.)$/.test(text)
+          }));
+    const sceneBlocks = rawSceneBlocks.map((block, index) => ({
+      text: block.text,
+      style: {
+        fontFamily: "'Lora',serif",
+        fontSize: block.isDialogue ? '17px' : '18px',
+        lineHeight: '1.78',
+        margin: '0 0 21px',
+        padding: block.isDialogue ? '12px 16px' : '0',
+        background: block.isDialogue ? 'rgba(201,162,39,0.14)' : 'transparent',
+        borderLeft: block.isDialogue ? '2px solid rgba(201,162,39,0.75)' : 'none',
+        fontStyle: block.isEmphasis ? 'italic' : 'normal',
+        color: block.isEmphasis ? '#6B581E' : '#26221B'
+      }
+    }));
     const hasConsequence = !!s.lastConsequence;
     const chronicleReversed = s.chronicle.slice().reverse().map((entry) => ({
       ...entry,

@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-11-live-validation-report-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-12-runtime-stability-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -43,6 +43,11 @@ var ECHO_EVENT_IDENTITY_VERSION = '1.0.0';
 var ECHO_COMMIT_RECONCILIATION_VERSION = '1.0.0';
 var ECHO_HEALTH_REPORT_VERSION = '1.0.0';
 var ECHO_VALIDATION_REPORT_VERSION = '1.0.0';
+var ECHO_PHASE12_RUNTIME_VERSION = '1.0.0';
+var ECHO_PHASE12_STATE_WAKE_PROBE_CACHE_KEY_ = 'ECHO_PHASE12_STATE_WAKE_PROBE_V1';
+var ECHO_PHASE12_STATE_WAKE_PROBE_TTL_SECONDS_ = 5;
+var ECHO_PHASE12_STALE_PROCESSING_AFTER_MS_ = 180000;
+var ECHO_PHASE12_MAX_CLIENT_RETRY_COUNT_ = 2;
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -161,6 +166,9 @@ function doGet(e) {
   if (action === 'validation-contract') {
     return jsonOutput_(echoGetValidationReportContract());
   }
+  if (action === 'runtime-contract') {
+    return jsonOutput_(echoGetRuntimeContract());
+  }
   if (action === 'delivery-policy') {
     return jsonOutput_(echoGetChatDeliveryPolicy());
   }
@@ -199,10 +207,14 @@ function doGet(e) {
     return jsonOutput_(echoGetPreferenceProjectionContract());
   }
   if (action === 'state') {
-    // Keep the payload read-only. A lightweight wake check only schedules the
+    // Keep the payload read-only. A throttled wake probe only schedules the
     // processor when the newest inbox row is still waiting.
     scheduleTurnProcessorWakeFromState_();
-    return jsonOutput_(getOverlayState_());
+    try {
+      return jsonOutput_(getOverlayState_());
+    } catch (error) {
+      return jsonOutput_(echoPhase12StateReadFailure_(error));
+    }
   }
   if (action === 'diagnostics') {
     requireApiKey_(e && e.parameter ? e.parameter.token : '');
@@ -326,6 +338,7 @@ function scheduleTurnProcessorWake_() {
 }
 
 function scheduleTurnProcessorWakeFromState_() {
+  if (!echoPhase12ShouldProbeStateWake_()) return false;
   try {
     var sheet = echoFastRequireSheet_(echoFastSpreadsheet_(), ECHO_CONFIG.sheets.turnInbox);
     var lastRow = sheet.getLastRow();
@@ -1903,7 +1916,7 @@ function processTurnInbox_(options) {
       var processingAge = stateTimestamp_(row.locked_at || row.processed_at || row.received_at);
       var staleProcessing = status === 'PROCESSING' &&
         processingAge > 0 &&
-        new Date().getTime() - processingAge > 5 * 60 * 1000;
+        new Date().getTime() - processingAge > ECHO_PHASE12_STALE_PROCESSING_AFTER_MS_;
 
       if (status === 'PROCESSING' && !staleProcessing) return;
       if (staleProcessing) {
@@ -3142,7 +3155,8 @@ function getOverlayState_() {
     projectionContract: echoProjectionContract_(),
     preferenceProjectionContract: echoPreferenceProjectionContract_(),
     validationContract: echoValidationReportContract_(),
-    dashboardProjection: dashboardProjection
+    dashboardProjection: dashboardProjection,
+    runtime: echoPhase12OverlayRuntime_(latestEvent, scene, overlayWarnings)
   };
 }
 
@@ -4261,7 +4275,9 @@ function echoGetHealthReport_() {
     preferenceProjection: preferenceHealth,
     preferenceProjectionContract: echoPreferenceProjectionContract_(),
     errors: errors,
-    warnings: warnings
+    warnings: warnings,
+    runtime: echoPhase12RuntimeContract_(),
+    last_runtime_failure: echoPhase12LastRuntimeFailure_()
   };
 }
 
@@ -4279,7 +4295,9 @@ function echoGetDiagnostics_() {
     preference_coverage: preference.preferenceCoverage,
     errors: preference.errors.concat(integrity.errors || []),
     warnings: preference.warnings.concat(schema.warnings || [], integrity.warnings || []),
-    integrity: integrity
+    integrity: integrity,
+    runtime: echoPhase12RuntimeContract_(),
+    last_runtime_failure: echoPhase12LastRuntimeFailure_()
   };
 }
 
@@ -4362,6 +4380,7 @@ function echoGetRuntimeContext() {
     context_binding_contract: echoContextBindingContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_(),
+    runtime_contract: echoPhase12RuntimeContract_(),
     projections: authoritative.projections,
     preferences: authoritative.preferences
   };
@@ -4385,7 +4404,10 @@ function echoTurnDelivery_(turn) {
     requires_readback: !overlayReady && status === 'COMMITTED',
     error_code: status === 'ERROR'
       ? String(turn.error_code || 'TURN_PROCESSING_ERROR')
-      : ''
+      : '',
+    retryable: ['PENDING', 'READY', 'PROCESSING', 'RECOVERY_REQUIRED'].indexOf(status) !== -1,
+    retry_after_ms: processing ? 5000 : 0,
+    stale_state_should_be_retained: processing || status === 'ERROR'
   };
 }
 
@@ -7265,3 +7287,135 @@ function commitSceneCorrectionCore_(event, options) {
   }
 }
 
+
+
+/* ===== Phase 12: runtime stability and failure-safe delivery =====
+ *
+ * This layer contains only technical runtime behavior. It never stores or
+ * hardcodes canon, private workbook identifiers, story prose, preferences, or
+ * live game state.
+ */
+
+function echoPhase12RuntimeContract_() {
+  return {
+    version: ECHO_PHASE12_RUNTIME_VERSION,
+    phase: 12,
+    mode: 'READ_ONLY_PROJECTION_WITH_IDEMPOTENT_PROCESSING',
+    state_source: 'ECHO_WORKBOOK',
+    private_state_in_repository: false,
+    overlay: {
+      stale_snapshot_guard: true,
+      retain_last_valid_snapshot_on_error: true,
+      no_store_reads: true,
+      single_flight_client_sync: true,
+      dialogue_rendering_source: 'SCENE_BLOCK_TYPE',
+      dialogue_highlight_only_for_type: 'dialogue'
+    },
+    processor: {
+      inline_processing_enabled: ECHO_INLINE_PROCESSING_ENABLED_,
+      max_rows_per_run: ECHO_PROCESSOR_MAX_ROWS_PER_RUN_,
+      stale_processing_after_ms: ECHO_PHASE12_STALE_PROCESSING_AFTER_MS_,
+      state_wake_probe_ttl_seconds: ECHO_PHASE12_STATE_WAKE_PROBE_TTL_SECONDS_,
+      duplicate_turns_are_idempotent: true
+    },
+    retry: {
+      max_client_retry_count: ECHO_PHASE12_MAX_CLIENT_RETRY_COUNT_,
+      retryable_statuses: ['PENDING', 'READY', 'PROCESSING', 'RECOVERY_REQUIRED'],
+      never_duplicate_event_or_transaction: true
+    },
+    timing: {
+      backend_measurement_scope: 'Apps Script reads, writes, locks and processor',
+      model_generation_outside_scope: true,
+      preferred_quality_window: '2–3 minutes when a full consistency pass is required'
+    }
+  };
+}
+
+function echoGetRuntimeContract() {
+  return {
+    ok: true,
+    contract: echoPhase12RuntimeContract_()
+  };
+}
+
+function echoPhase12ShouldProbeStateWake_() {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (cache.get(ECHO_PHASE12_STATE_WAKE_PROBE_CACHE_KEY_) === '1') return false;
+    cache.put(
+      ECHO_PHASE12_STATE_WAKE_PROBE_CACHE_KEY_,
+      '1',
+      ECHO_PHASE12_STATE_WAKE_PROBE_TTL_SECONDS_
+    );
+    return true;
+  } catch (error) {
+    // Cache is an optimization only. A failed cache must never suppress a
+    // processor wake check.
+    return true;
+  }
+}
+
+function echoPhase12RememberRuntimeFailure_(scope, error) {
+  var message = String(error && error.message ? error.message : error);
+  var payload = {
+    scope: String(scope || 'runtime'),
+    message: message.slice(0, 500),
+    recorded_at: new Date().toISOString(),
+    build: ECHO_BUILD_ID
+  };
+  try {
+    CacheService.getScriptCache().put(
+      'ECHO_PHASE12_LAST_RUNTIME_FAILURE_V1',
+      JSON.stringify(payload),
+      600
+    );
+  } catch (cacheError) {
+    // Failure telemetry is best effort and never blocks the read path.
+  }
+  return payload;
+}
+
+function echoPhase12LastRuntimeFailure_() {
+  try {
+    var raw = CacheService.getScriptCache().get('ECHO_PHASE12_LAST_RUNTIME_FAILURE_V1');
+    return raw ? parseJson_(raw, null) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function echoPhase12StateReadFailure_(error) {
+  var failure = echoPhase12RememberRuntimeFailure_('overlay_state_read', error);
+  return {
+    ok: false,
+    source: 'google-apps-script',
+    build: ECHO_BUILD_ID,
+    error: {
+      code: 'STATE_READ_FAILED',
+      message: failure.message
+    },
+    runtime: {
+      phase: 12,
+      retryable: true,
+      retry_after_ms: 5000,
+      retain_last_valid_snapshot: true,
+      no_narrative_in_error_response: true
+    },
+    chatDelivery: echoChatDeliveryPolicy_()
+  };
+}
+
+function echoPhase12OverlayRuntime_(latestEvent, scene, warnings) {
+  return {
+    phase: 12,
+    version: ECHO_PHASE12_RUNTIME_VERSION,
+    read_only: true,
+    generated_at: new Date().toISOString(),
+    latest_sequence: latestEvent ? Number(latestEvent.sequence || 0) : 0,
+    latest_event_id: latestEvent ? String(latestEvent.event_id || '') : '',
+    latest_feed_id: scene ? String(scene.feed_id || '') : '',
+    warning_count: Array.isArray(warnings) ? warnings.length : 0,
+    stale_snapshot_guard: true,
+    server_projection_status: 'OK'
+  };
+}
