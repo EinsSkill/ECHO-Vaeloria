@@ -56,6 +56,7 @@ var ECHO_PHASE17_MAGIC_VERSION = '1.0.0';
 var ECHO_PHASE17_MAGIC_CONTRACT_VERSION = '1.0.0';
 var ECHO_PHASE18_OVERLAY_VERSION = '1.0.0';
 var ECHO_PHASE19_RELEASE_VERSION = '1.0.0';
+var ECHO_PHASE19_CORRECTION_REPROCESS_STATUS_ = 'RELEASE_REPROCESS_REQUIRED';
 var ECHO_PHASE19_REQUIRED_PACKAGE_FILES_ = [
   'Code.gs',
   'Index.html',
@@ -390,7 +391,7 @@ function scheduleTurnProcessorWakeFromState_() {
 
     var values = sheet.getRange(lastRow, 1, 1, lastColumn).getValues()[0];
     var status = String(values[statusIndex] || '').trim().toUpperCase();
-    if (['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(status) === -1) return false;
+    if (['PENDING', 'READY', 'RECOVERY_REQUIRED', ECHO_PHASE19_CORRECTION_REPROCESS_STATUS_].indexOf(status) === -1) return false;
     return scheduleTurnProcessorWake_();
   } catch (error) {
     return false;
@@ -2111,7 +2112,7 @@ function processTurnInbox_(options) {
         !String(row.processed_at || '').trim() &&
         isSceneCorrectionRow_(row);
 
-      if (['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(status) === -1 && !retryableCorrection) {
+      if (['PENDING', 'READY', 'RECOVERY_REQUIRED', ECHO_PHASE19_CORRECTION_REPROCESS_STATUS_].indexOf(status) === -1 && !retryableCorrection) {
         return;
       }
       if (candidateCount >= maxRows) return;
