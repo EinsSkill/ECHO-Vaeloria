@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-9-canonical-projection-health-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-10-deterministic-preference-projection-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -187,6 +187,9 @@ function doGet(e) {
   }
   if (action === 'validate-preferences') {
     return jsonOutput_(echoValidatePreferenceProfile());
+  }
+  if (action === 'preference-projection-contract') {
+    return jsonOutput_(echoGetPreferenceProjectionContract());
   }
   if (action === 'state') {
     // Keep the payload read-only. A lightweight wake check only schedules the
@@ -1805,6 +1808,7 @@ function echoGetSceneContract() {
     resolution_contract: echoResolutionContract_(),
     overlay_contract: echoOverlayContract_(),
     projection_contract: echoProjectionContract_(),
+    preference_projection_contract: echoPreferenceProjectionContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_()
   };
@@ -3128,6 +3132,7 @@ function getOverlayState_() {
     resolutionContract: echoResolutionContract_(),
     overlayContract: echoOverlayContract_(),
     projectionContract: echoProjectionContract_(),
+    preferenceProjectionContract: echoPreferenceProjectionContract_(),
     dashboardProjection: dashboardProjection
   };
 }
@@ -3715,6 +3720,15 @@ function echoGetHealthReport_() {
   var eventRows = [];
   var sceneRows = [];
   var inboxRows = [];
+  var preferenceContext = null;
+  var preferenceHealth = {
+    ok: false,
+    available: false,
+    complete: false,
+    presentQuestions: 0,
+    totalQuestions: ECHO_PREFERENCE_COVERAGE_.length,
+    missingQuestionIds: []
+  };
 
   try {
     schema = echoPhase2SchemaStatus_();
@@ -3736,6 +3750,37 @@ function echoGetHealthReport_() {
   } catch (error) {
     errors.push({
       code: 'STATE_PROJECTION_FAILED',
+      message: String(error && error.message ? error.message : error)
+    });
+  }
+
+  try {
+    preferenceContext = getEchoPreferenceContext_({ includeAudit: false });
+    var coverage = preferenceContext.preferenceCoverage || {};
+    var preferenceValidation = preferenceContext.validation || {};
+    preferenceHealth = {
+      ok: preferenceValidation.ok === true && coverage.complete === true,
+      available: preferenceContext.available === true,
+      complete: coverage.complete === true,
+      presentQuestions: Number(coverage.presentQuestions || 0),
+      totalQuestions: Number(coverage.totalQuestions || ECHO_PREFERENCE_COVERAGE_.length),
+      missingQuestionIds: Array.isArray(coverage.missingQuestionIds)
+        ? coverage.missingQuestionIds.slice()
+        : []
+    };
+    if (Array.isArray(preferenceValidation.warnings)) {
+      warnings = warnings.concat(preferenceValidation.warnings);
+    }
+    if (!preferenceHealth.ok) {
+      errors.push({
+        code: 'PREFERENCE_PROJECTION_FAILED',
+        message: 'Die effektive Präferenzprojektion oder die PREF-026-Fragenabdeckung ist nicht vollständig.',
+        coverage: preferenceHealth
+      });
+    }
+  } catch (error) {
+    errors.push({
+      code: 'PREFERENCE_PROJECTION_FAILED',
       message: String(error && error.message ? error.message : error)
     });
   }
@@ -3875,9 +3920,12 @@ function echoGetHealthReport_() {
         ok: dialoguePresentationOk,
         dialogueBlocks: dialogueBlocks.length
       },
-      uniqueEventIds: { ok: duplicateEventIds.length === 0 }
+      uniqueEventIds: { ok: duplicateEventIds.length === 0 },
+      preferenceProjection: preferenceHealth
     },
     dashboardProjection: dashboardProjection,
+    preferenceProjection: preferenceHealth,
+    preferenceProjectionContract: echoPreferenceProjectionContract_(),
     errors: errors,
     warnings: warnings
   };
@@ -3975,6 +4023,7 @@ function echoGetRuntimeContext() {
     resolution_contract: echoResolutionContract_(),
     overlay_contract: echoOverlayContract_(),
     projection_contract: echoProjectionContract_(),
+    preference_projection_contract: echoPreferenceProjectionContract_(),
     context_binding_contract: echoContextBindingContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_(),
@@ -4490,6 +4539,7 @@ function echoFastJsonValue_(value) {
  */
 
 var ECHO_PREFERENCE_SCHEMA_VERSION = '1.0.0';
+var ECHO_PREFERENCE_PROJECTION_VERSION = '1.0.0';
 
 var ECHO_PREFERENCE_HEADERS_ = [
   'preference_id', 'scope', 'subject_id', 'category', 'preference_key',
@@ -4793,6 +4843,73 @@ function profileId_(prefix) {
   return String(prefix || 'PROFILE') + '-' + uuid.slice(0, 16);
 }
 
+
+function echoPreferenceProjectionContract_() {
+  return {
+    version: ECHO_PREFERENCE_PROJECTION_VERSION,
+    source_of_truth: 'ECHO_PREFERENCE_PROFILE',
+    active_statuses: Object.keys(ECHO_PROFILE_ACTIVE_STATUSES_),
+    identity: ['scope', 'subject_id', 'category', 'preference_key'],
+    duplicate_policy: 'Newest active row by updated_at, then sheet row number.',
+    invalid_rows: 'Rows without a complete identity are excluded from the effective projection and remain validation errors.',
+    read_rule: 'Build the effective preference projection before every turn; never rely on sheet order.',
+    questionnaire_policy: 'PREF-026 answers remain mapped to their question IDs and are checked for complete coverage.'
+  };
+}
+
+function echoGetPreferenceProjectionContract() {
+  return {
+    ok: true,
+    contract: echoPreferenceProjectionContract_()
+  };
+}
+
+function echoPreferenceIdentity_(row) {
+  row = row || {};
+  var scope = String(row.scope || '').trim().toUpperCase();
+  var subjectId = String(row.subject_id || '').trim();
+  var category = String(row.category || '').trim();
+  var key = String(row.preference_key || '').trim();
+  if (!scope || !subjectId || !category || !key) return '';
+  return [scope, subjectId, category, key].join('|');
+}
+
+function echoNewestActivePreferenceRows_(rows, warnings) {
+  warnings = warnings || [];
+  var newest = {};
+  var duplicateCounts = {};
+
+  (rows || []).forEach(function (row) {
+    if (!echoProfileStatusIsActive_(row.status)) return;
+
+    var identity = echoPreferenceIdentity_(row);
+    if (!identity) return;
+
+    if (newest[identity]) {
+      duplicateCounts[identity] = (duplicateCounts[identity] || 0) + 1;
+    }
+    if (!newest[identity] || recordIsNewer_(row, newest[identity])) {
+      newest[identity] = row;
+    }
+  });
+
+  Object.keys(duplicateCounts).forEach(function (identity) {
+    warnings.push({
+      code: 'PREFERENCE_DUPLICATE_ACTIVE',
+      identity: identity,
+      ignored_rows: duplicateCounts[identity],
+      selected_row: Number(newest[identity].__rowNumber || 0),
+      message: 'Mehrere aktive Präferenzzeilen gefunden; die neueste Zeile wird verwendet.'
+    });
+  });
+
+  return Object.keys(newest)
+    .map(function (identity) { return newest[identity]; })
+    .sort(function (left, right) {
+      return Number(left.__rowNumber || 0) - Number(right.__rowNumber || 0);
+    });
+}
+
 function validateEchoPreferenceStorage_(options) {
   options = options || {};
   var errors = [];
@@ -4843,6 +4960,17 @@ function validateEchoPreferenceStorage_(options) {
         } catch (error) {
           errors.push('Invalid JSON in preference: ' + identity);
         }
+      }
+    });
+
+    // Validation still inspects every active row, but questionnaire answers are
+    // taken from the same deterministic effective projection used at runtime.
+    var projectedPreferenceRows = echoNewestActivePreferenceRows_(preferenceTable.rows, warnings);
+    questionnaireAnswers = null;
+    projectedPreferenceRows.forEach(function (row) {
+      if (String(row.category || '').trim() === 'audit' &&
+          String(row.preference_key || '').trim() === 'questionnaire_answers') {
+        questionnaireAnswers = profileValue_(row.value_json, row.value_type);
       }
     });
 
@@ -5002,6 +5130,10 @@ function getEchoPreferenceContext_(options) {
   var rawAudit = null;
   var profileVersion = ECHO_PREFERENCE_SCHEMA_VERSION;
   var seen = {};
+
+  // Sheet order is not authoritative. Resolve the newest active row for each
+  // preference identity before building the effective policy.
+  preferenceRows = echoNewestActivePreferenceRows_(preferenceRows);
 
   preferenceRows.forEach(function (row) {
     if (!echoProfileStatusIsActive_(row.status)) return;
@@ -5829,6 +5961,7 @@ function getEchoAuthoritativeContext_(options) {
       projection_rule: 'Use the current workbook-backed projections; never invent missing facts or numeric relationship values.'
     },
     projection_contract: echoProjectionContract_(),
+    preference_projection_contract: echoPreferenceProjectionContract_(),
     scene_readback_contract: echoSceneReadbackContract_(),
     commit_reconciliation_contract: echoCommitReconciliationContract_(),
     projections: projections
