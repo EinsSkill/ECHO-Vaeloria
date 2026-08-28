@@ -1,8 +1,8 @@
-name: Phase 3B resolution foundation
+name: Phase 7 event reconciliation and identity protection
 
 on:
   push:
-    branches: [main, phase-3b-resolution-runtime]
+    branches: [main, phase-3c-overlay-delivery, phase-4-state-projections, phase-5-context-binding, phase-6-scene-readback, phase-7-event-reconciliation]
   pull_request:
     branches: [main]
 
@@ -26,3 +26,13 @@ jobs:
         run: node tests/phase-3-narrative-runtime.test.js
       - name: Run Phase 3B checks
         run: node tests/phase-3b-resolution-runtime.test.js
+      - name: Run Phase 3C checks
+        run: node tests/phase-3c-overlay-delivery.test.js
+      - name: Run Phase 4 checks
+        run: node tests/phase-4-state-projections.test.js
+      - name: Run Phase 5 checks
+        run: node tests/phase-5-context-binding.test.js
+      - name: Run Phase 6 checks
+        run: node tests/phase-6-scene-readback.test.js
+      - name: Run Phase 7 checks
+        run: node tests/phase-7-event-reconciliation.test.js
