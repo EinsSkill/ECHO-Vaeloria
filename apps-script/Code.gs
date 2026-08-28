@@ -29,7 +29,7 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-13-scene-format-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-14-relationship-safety-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
@@ -48,6 +48,7 @@ var ECHO_PHASE12_STATE_WAKE_PROBE_CACHE_KEY_ = 'ECHO_PHASE12_STATE_WAKE_PROBE_V1
 var ECHO_PHASE12_STATE_WAKE_PROBE_TTL_SECONDS_ = 5;
 var ECHO_PHASE12_STALE_PROCESSING_AFTER_MS_ = 180000;
 var ECHO_PHASE12_MAX_CLIENT_RETRY_COUNT_ = 2;
+var ECHO_PHASE14_RELATIONSHIP_VERSION = '1.0.0';
 
 var ECHO_SCENE_BLOCK_TYPES_ = {
   heading: true,
@@ -183,6 +184,9 @@ function doGet(e) {
   }
   if (action === 'projection-contract') {
     return jsonOutput_(echoGetProjectionContract());
+  }
+  if (action === 'relationship-contract') {
+    return jsonOutput_(echoGetRelationshipContract());
   }
   if (action === 'context-binding-contract') {
     return jsonOutput_(echoGetContextBindingContract());
@@ -3269,6 +3273,7 @@ function getOverlayState_() {
     characters: projections.characters,
     groups: projections.groups,
 
+    relationshipContract: echoRelationshipDirectoryContract_(),
     relationshipProfiles: preferenceContext.characters
       .filter(function (profile) {
         return !isTechnicalRelationshipPlaceholder_({ entity_b: profile.entityId });
@@ -3499,9 +3504,12 @@ function relationshipToOverlay_(row, profile) {
   var summary = echoRelationshipSummary_(role, profile, consentState, allAxes, qualitativeStats);
   var displayRole = echoRelationshipCompactRole_(role, profile, allAxes, qualitativeStats);
   var profileLoaded = profileHasDisplayData_(profile) || qualitativeStats.length > 0;
+  var safeIntimacy = ['NEGOTIATED', 'OPEN'].indexOf(consentState) !== -1;
+  var boundaryStatus = boundaries.length ? 'recorded' : 'not_recorded';
 
   return {
     id: row.state_id || profile.entityId || row.entity_b || 'UNKNOWN_RELATIONSHIP',
+    entityId: String(profile.entityId || row.entity_b || ''),
     name: row.display_name || profile.displayName || row.entity_b || 'Unbekannte Bindung',
     role: displayRole,
     baseRole: role,
@@ -3510,6 +3518,21 @@ function relationshipToOverlay_(row, profile) {
     }).join(' · '),
     summary: summary,
     axes: visibleAxes,
+    source: {
+      relationshipState: !!String(row.state_id || '').trim(),
+      characterProfile: !!String(profile.entityId || '').trim(),
+      relationshipStateId: String(row.state_id || ''),
+      characterProfileId: String(profile.profileId || '')
+    },
+    safety: {
+      consentState: consentState,
+      consentLabel: consentLabel_(consentState),
+      intimacyEligible: safeIntimacy,
+      boundaryStatus: boundaryStatus,
+      boundaryCount: boundaries.length,
+      numericValuesAreSourceBacked: true,
+      unknownValuesRemainUnknown: true
+    },
     stats: {
       displayMode: 'compact',
       exactNumbersHidden: true,
@@ -3544,11 +3567,10 @@ function relationshipToOverlay_(row, profile) {
       }
     },
     intimacy: {
-      available: consentState !== 'UNKNOWN' || visibleAxes.some(function (axis) {
-        return ['tension', 'desire', 'intimacy'].indexOf(axis.key) !== -1;
-      }),
+      available: safeIntimacy,
       consentState: consentState,
       consentLabel: consentLabel_(consentState),
+      eligible: safeIntimacy,
       tension: axisOrProfile(row.tension, 'tension') !== null
         ? axisOrProfile(row.tension, 'tension')
         : axisOrProfile(row.intimacy, 'intimacy'),
@@ -3559,13 +3581,13 @@ function relationshipToOverlay_(row, profile) {
       initiationStyle: profile.initiationStyle || '',
       aftercareStyle: profile.aftercareStyle || '',
       boundaries: boundaries,
+      boundaryStatus: boundaryStatus,
       phase: row.intimacy_phase || intimacyProfile.phase || '',
       qualitative: qualitativeStats,
       profileLoaded: profileLoaded
     }
   };
 }
-
 
 function relationshipConsentState_(row, intimacyProfile) {
   var raw = row.consent_state || row.consent_profile || intimacyProfile.consent_state || 'UNKNOWN';
@@ -6055,21 +6077,81 @@ function isTechnicalRelationshipPlaceholder_(row) {
   });
 }
 
+function echoRelationshipDirectoryContract_() {
+  return {
+    version: ECHO_PHASE14_RELATIONSHIP_VERSION,
+    phase: 14,
+    source_of_truth: 'ECHO_WORKBOOK',
+    profile_source: 'ECHO_CHARACTER_PROFILES',
+    relationship_source: 'RELATIONSHIP_STATE',
+    duplicate_policy: 'Latest active relationship row by updated_at, then sheet row number; one visible card per entity.',
+    unknown_policy: 'Unknown numeric axes remain unknown until an event establishes them; no numeric value is inferred from narrative preference data.',
+    consent_policy: 'UNKNOWN, PAUSED and REVOKED never authorize intimacy; NEGOTIATED and OPEN are the only active consent states.',
+    boundary_policy: 'Only boundaries_json from RELATIONSHIP_STATE or ECHO_CHARACTER_PROFILES are shown; an empty list means no boundary was recorded, not that no boundary exists.',
+    autonomy_policy: 'Character profiles describe tendencies and boundaries; major story decisions remain with the player.',
+    projection_guarantees: [
+      'Technical placeholder relationships are excluded.',
+      'Relationship and profile rows are deduplicated by canonical entity.',
+      'Numerical stats are shown only when the source contains a numeric value.',
+      'Consent and boundary state are exposed separately from attraction or tension.'
+    ]
+  };
+}
+
+function echoGetRelationshipContract() {
+  return {
+    ok: true,
+    contract: echoRelationshipDirectoryContract_()
+  };
+}
+
+function echoRelationshipOverlayEntityId_(row, profileByEntity) {
+  row = row || {};
+  var raw = String(row.entity_b || row.character_id || row.entity_id || '').trim();
+  if (!raw) return '';
+  var profile = profileByEntity && profileByEntity[raw];
+  return String(profile && profile.entityId ? profile.entityId : raw);
+}
+
+function echoRelationshipOverlayRowIsLater_(candidate, current) {
+  if (!current) return true;
+  var candidateTime = stateTimestamp_(candidate.updated_at || candidate.timestamp || candidate.created_at);
+  var currentTime = stateTimestamp_(current.updated_at || current.timestamp || current.created_at);
+  if (candidateTime !== currentTime) return candidateTime > currentTime;
+  return Number(candidate.__rowNumber || 0) > Number(current.__rowNumber || 0);
+}
+
 function echoRelationshipOverlays_(rows, profiles) {
   var profileByEntity = characterProfilesByEntity_(profiles || []);
-  var linkedProfiles = {};
-  var result = [];
+  var latestByEntity = {};
 
   (rows || []).forEach(function (row) {
-    if (isTechnicalRelationshipPlaceholder_(row)) return;
+    var entityId = echoRelationshipOverlayEntityId_(row, profileByEntity);
+    if (!entityId || isTechnicalRelationshipPlaceholder_({ entity_b: entityId })) return;
 
-    var profile = profileByEntity[row.entity_b] || null;
-    if (profile) linkedProfiles[profile.entityId] = true;
-    result.push(relationshipToOverlay_(row, profile));
+    if (!latestByEntity[entityId] ||
+        echoRelationshipOverlayRowIsLater_(row, latestByEntity[entityId])) {
+      latestByEntity[entityId] = row;
+    }
   });
 
-  // A newly introduced woman is visible immediately, even if the separate
-  // numeric RELATIONSHIP_STATE row is created by a later event.
+  var linkedProfiles = {};
+  var result = Object.keys(latestByEntity)
+    .sort(function (left, right) {
+      var leftProfile = profileByEntity[left];
+      var rightProfile = profileByEntity[right];
+      return echoPhase4CompareText_(
+        leftProfile && leftProfile.displayName || left,
+        rightProfile && rightProfile.displayName || right
+      );
+    })
+    .map(function (entityId) {
+      var row = latestByEntity[entityId];
+      var profile = profileByEntity[entityId] || profileByEntity[row.entity_b] || null;
+      if (profile) linkedProfiles[profile.entityId] = true;
+      return relationshipToOverlay_(row, profile);
+    });
+
   (profiles || []).forEach(function (profile) {
     if (isTechnicalRelationshipPlaceholder_({ entity_b: profile.entityId })) return;
     if (linkedProfiles[profile.entityId]) return;
@@ -6086,68 +6168,6 @@ function echoRelationshipOverlays_(rows, profiles) {
 
   return result;
 }
-
-
-
-// ===== Phase 2: workbook authority, resumable transactions and projections =====
-
-var ECHO_PHASE2_SCHEMA_VERSION = '1.0.0';
-
-var ECHO_PHASE2_SCHEMA_ = {
-  TURN_INBOX: [
-    'turn_id', 'chat_id', 'received_at', 'raw_input', 'parsed_intent_json',
-    'validation_status', 'commit_event_id', 'ui_feed_id', 'error_code',
-    'processed_at', 'processing_token', 'attempt_count', 'transaction_id',
-    'locked_at', 'context_fingerprint', 'context_read_at'
-  ],
-  EVENT_LOG: [
-    'event_id', 'run_id', 'sequence', 'timestamp', 'chat_id', 'event_type',
-    'player_action', 'narrative_summary', 'state_changes_json', 'new_flags',
-    'affected_entities', 'canonicality', 'source', 'reversible', 'notes',
-    'content_rating', 'intimacy_mode', 'resolution_json', 'resolution_mode', 'resolution_outcome', 'turn_id', 'transaction_id',
-    'revision_id', 'committed_at', 'payload_fingerprint'
-  ],
-  SCENE_FEED: [
-    'feed_id', 'run_id', 'sequence', 'event_id', 'scene_type', 'title',
-    'location_id', 'narrative_text', 'scene_blocks_json', 'scene_contract_version', 'resolution_json', 'mood',
-    'visible_changes_json', 'available_actions_json', 'portraits_json',
-    'map_delta_json', 'relationship_delta_json', 'status', 'content_rating',
-    'intimacy_mode', 'scene_id', 'revision_id', 'revision_number',
-    'supersedes_feed_id', 'is_current', 'transaction_id', 'created_at'
-  ],
-  SCENE_REVISIONS: [
-    'revision_id', 'scene_id', 'feed_id', 'revision_number', 'event_id',
-    'source_event_id', 'turn_id', 'source_feed_id', 'supersedes_feed_id',
-    'reason', 'created_at', 'transaction_id', 'payload_fingerprint'
-  ],
-  TURN_TRANSACTIONS: [
-    'transaction_id', 'turn_id', 'event_id', 'status', 'created_at',
-    'updated_at', 'attempt', 'payload_fingerprint', 'plan_json',
-    'event_logged_at', 'scene_revision_at', 'state_applied_at',
-    'relationships_applied_at', 'items_applied_at', 'group_members_applied_at',
-    'preferences_applied_at', 'profiles_applied_at', 'committed_at',
-    'error_code', 'recovery_action', 'context_fingerprint', 'ui_feed_id',
-    'revision_id'
-  ],
-  ITEM_STATE: [
-    'item_id', 'display_name', 'item_type', 'owner_type', 'owner_id',
-    'location_id', 'status', 'metadata_json', 'last_event_id', 'updated_at',
-    'source', 'revision'
-  ],
-  GROUP_MEMBERS: [
-    'member_id', 'group_id', 'entity_id', 'display_name', 'role', 'status',
-    'joined_at', 'left_at', 'position', 'traits_json', 'boundaries_json',
-    'last_event_id', 'updated_at', 'source'
-  ],
-  RELATIONSHIP_STATE: [
-    'state_id', 'entity_a', 'entity_b', 'trust', 'desire', 'respect', 'fear',
-    'intimacy', 'power_gap', 'dependence', 'agency', 'resentment',
-    'consent_profile', 'status', 'last_event_id', 'notes', 'tension', 'safety',
-    'dominance', 'submission', 'consent_state', 'boundaries_json',
-    'intimacy_phase', 'intimacy_profile_json', 'teaching', 'updated_at',
-    'transaction_id'
-  ]
-};
 
 function echoPhase2GetOrCreateSheet_(name) {
   var ss = echoSpreadsheet_();
