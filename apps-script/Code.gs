@@ -29,11 +29,11 @@ var ECHO_CONFIG = {
 };
 
 
-var ECHO_BUILD_ID = 'phase-12-runtime-stability-2026-08-28-r1';
+var ECHO_BUILD_ID = 'phase-13-scene-format-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
-var ECHO_SCENE_CONTRACT_VERSION = '1.0.0';
+var ECHO_SCENE_CONTRACT_VERSION = '1.1.0';
 var ECHO_RESOLUTION_CONTRACT_VERSION = '1.0.0';
 var ECHO_OVERLAY_CONTRACT_VERSION = '1.0.0';
 var ECHO_PROJECTION_CONTRACT_VERSION = '1.0.0';
@@ -1062,6 +1062,139 @@ function sceneBlockText_(block) {
   ).replace(/\r\n/g, '\n').trim();
 }
 
+
+function echoLegacySceneBlock_(type, text, speaker) {
+  var normalized = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\s*\n\s*/g, ' ')
+    .trim();
+  if (!normalized) return null;
+  return {
+    type: type || 'prose',
+    text: normalized,
+    speaker: String(speaker || '').trim(),
+    character_id: '',
+    tone: '',
+    emphasis: ''
+  };
+}
+
+function echoLegacyDialoguePrefix_(prefix) {
+  var value = String(prefix || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\s*\n\s*/g, ' ')
+    .trim()
+    .replace(/^[—–-]\s*/, '')
+    .replace(/\s*[—–-]\s*$/, '')
+    .trim();
+  if (!value) return { speaker: '', remove: false };
+
+  if (value.charAt(value.length - 1) === ':') {
+    value = value.slice(0, -1).trim();
+  }
+
+  var token = "[A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9'’.-]*";
+  var nameOnly = new RegExp('^' + token + '(?:\\s+' + token + '){0,4}$');
+  if (nameOnly.test(value)) return { speaker: value, remove: true };
+
+  var speechVerb = new RegExp(
+    '^(' + token + '(?:\\s+' + token + '){0,4})\\s+' +
+    '(?:sagt|fragt|antwortet|erwidert|flüstert|ruft|schreit|befiehlt|weist|meint|warnt|knurrt|lacht|seufzt)' +
+    '\\s*$',
+    'i'
+  );
+  var match = speechVerb.exec(value);
+  return match
+    ? { speaker: String(match[1] || '').trim(), remove: true }
+    : { speaker: '', remove: false };
+}
+
+function echoLegacyDialogueText_(quoted) {
+  return String(quoted || '')
+    .replace(/^\s*[„“«"]/, '')
+    .replace(/[“”»"]\s*$/, '')
+    .trim();
+}
+
+function echoLegacyDialogueMatches_(paragraph) {
+  var patterns = [
+    /„[\s\S]*?“/g,
+    /„[\s\S]*?”/g,
+    /“[\s\S]*?”/g,
+    /«[\s\S]*?»/g,
+    /"[^"\n]+"/g
+  ];
+  var best = null;
+
+  patterns.forEach(function (pattern) {
+    var match;
+    while ((match = pattern.exec(paragraph)) !== null) {
+      if (!best || match.index < best.index) best = { index: match.index, text: match[0] };
+      break;
+    }
+  });
+
+  return best;
+}
+
+function sceneBlocksFromLegacyText_(raw) {
+  var value = String(raw || '').replace(/\r\n/g, '\n').trim();
+  if (!value) return [];
+
+  var blocks = [];
+  value.split(/\n\s*\n/).forEach(function (paragraph) {
+    var normalizedParagraph = paragraph.replace(/\s*\n\s*/g, ' ').trim();
+    if (!normalizedParagraph) return;
+
+    if (/^[—–]\s+\S/.test(normalizedParagraph) &&
+        normalizedParagraph.indexOf('„') === -1 &&
+        normalizedParagraph.indexOf('“') === -1 &&
+        normalizedParagraph.indexOf('«') === -1 &&
+        normalizedParagraph.indexOf('"') === -1) {
+      var dashBlock = echoLegacySceneBlock_('dialogue', normalizedParagraph.replace(/^[—–]\s+/, ''), '');
+      if (dashBlock) blocks.push(dashBlock);
+      return;
+    }
+
+    var cursor = 0;
+    var firstMatch = true;
+    var foundDialogue = false;
+    var match;
+
+    while ((match = echoLegacyDialogueMatches_(normalizedParagraph.slice(cursor))) !== null) {
+      var absoluteIndex = cursor + match.index;
+      var before = normalizedParagraph.slice(cursor, absoluteIndex);
+      var prefix = firstMatch ? echoLegacyDialoguePrefix_(before) : { speaker: '', remove: false };
+      if (prefix.remove) before = '';
+
+      var proseBlock = echoLegacySceneBlock_('prose', before, '');
+      if (proseBlock) blocks.push(proseBlock);
+
+      var dialogueBlock = echoLegacySceneBlock_('dialogue', echoLegacyDialogueText_(match.text), prefix.speaker);
+      if (dialogueBlock) {
+        blocks.push(dialogueBlock);
+        foundDialogue = true;
+      } else {
+        var literalBlock = echoLegacySceneBlock_('prose', match.text, '');
+        if (literalBlock) blocks.push(literalBlock);
+      }
+
+      cursor = absoluteIndex + match.text.length;
+      firstMatch = false;
+    }
+
+    var tail = echoLegacySceneBlock_('prose', normalizedParagraph.slice(cursor), '');
+    if (tail) blocks.push(tail);
+
+    if (!foundDialogue && !blocks.length) {
+      var fallbackBlock = echoLegacySceneBlock_('prose', normalizedParagraph, '');
+      if (fallbackBlock) blocks.push(fallbackBlock);
+    }
+  });
+
+  return blocks;
+}
+
 function normalizeSceneBlocks_(raw, options) {
   options = options || {};
   var strict = options.strict !== false;
@@ -1193,16 +1326,7 @@ function sceneBlocksForOverlay_(scene) {
   if (blocks.length) return blocks.map(echoDecorateOverlayBlock_);
 
   var fallback = String(scene.narrative_text || '').trim();
-  return fallback
-    ? [echoDecorateOverlayBlock_({
-        type: 'prose',
-        text: fallback,
-        speaker: '',
-        character_id: '',
-        tone: '',
-        emphasis: ''
-      })]
-    : [];
+  return sceneBlocksFromLegacyText_(fallback).map(echoDecorateOverlayBlock_);
 }
 
 function sceneBlocksForStorage_(scene) {
@@ -1212,7 +1336,7 @@ function sceneBlocksForStorage_(scene) {
     : (scene.blocks_json !== undefined ? scene.blocks_json : scene.blocks);
   var blocks = normalizeSceneBlocks_(raw, { strict: true });
   if (!blocks.length && String(scene.narrative_text || '').trim()) {
-    blocks = normalizeSceneBlocks_([scene.narrative_text], { strict: true });
+    blocks = sceneBlocksFromLegacyText_(scene.narrative_text);
   }
   if (!blocks.length) throw new Error('scene requires at least one visible scene block.');
   return blocks;
@@ -1815,9 +1939,16 @@ function echoSceneContract_() {
     aliases: ECHO_SCENE_BLOCK_TYPE_ALIASES_,
     required_block_fields: ['type', 'text'],
     optional_block_fields: ['speaker', 'character_id', 'tone', 'emphasis'],
+    output_guarantee: 'Each visible dialogue segment is its own block; prose between dialogue segments is never highlighted.',
     order: ['heading', 'prose', 'dialogue', 'action', 'sensory', 'system', 'change', 'status', 'prompt'],
     visibility_rule: 'Only visible blocks may be written to SCENE_FEED.',
-    legacy_rule: 'Missing blocks are normalized to one prose block from narrative_text.'
+    legacy_rule: 'Missing blocks are derived from narrative_text; quoted and dash-led speech becomes dialogue, surrounding text remains prose.',
+    legacy_detection: {
+      quote_pairs: ['„…“', '“…”', '«…»', '"…"'],
+      dash_led_speech: true,
+      speaker_prefixes: ['Name:', 'Name sagt:'],
+      false_positive_policy: 'Only unmistakable quoted or dash-led segments are highlighted.'
+    }
   };
 }
 
