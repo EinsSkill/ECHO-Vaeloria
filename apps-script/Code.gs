@@ -33,7 +33,7 @@ var ECHO_BUILD_ID = 'phase-19-release-regression-2026-08-28-r1';
 var ECHO_STATE_MODEL_VERSION = '3.0.0';
 var ECHO_TRANSACTION_MODEL_VERSION = '1.0.0';
 var ECHO_PREFERENCE_POLICY_VERSION = '1.1.0';
-var ECHO_SCENE_CONTRACT_VERSION = '1.1.0';
+var ECHO_SCENE_CONTRACT_VERSION = '1.0.0';
 var ECHO_RESOLUTION_CONTRACT_VERSION = '1.0.0';
 var ECHO_OVERLAY_CONTRACT_VERSION = '1.0.0';
 var ECHO_PROJECTION_CONTRACT_VERSION = '1.0.0';
@@ -56,6 +56,7 @@ var ECHO_PHASE17_MAGIC_VERSION = '1.0.0';
 var ECHO_PHASE17_MAGIC_CONTRACT_VERSION = '1.0.0';
 var ECHO_PHASE18_OVERLAY_VERSION = '1.0.0';
 var ECHO_PHASE19_RELEASE_VERSION = '1.0.0';
+var ECHO_PHASE19_CORRECTION_REPROCESS_STATUS_ = 'RELEASE_REPROCESS_REQUIRED';
 var ECHO_PHASE19_REQUIRED_PACKAGE_FILES_ = [
   'Code.gs',
   'Index.html',
@@ -390,7 +391,7 @@ function scheduleTurnProcessorWakeFromState_() {
 
     var values = sheet.getRange(lastRow, 1, 1, lastColumn).getValues()[0];
     var status = String(values[statusIndex] || '').trim().toUpperCase();
-    if (['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(status) === -1) return false;
+    if (['PENDING', 'READY', 'RECOVERY_REQUIRED', ECHO_PHASE19_CORRECTION_REPROCESS_STATUS_].indexOf(status) === -1) return false;
     return scheduleTurnProcessorWake_();
   } catch (error) {
     return false;
@@ -2111,7 +2112,7 @@ function processTurnInbox_(options) {
         !String(row.processed_at || '').trim() &&
         isSceneCorrectionRow_(row);
 
-      if (['PENDING', 'READY', 'RECOVERY_REQUIRED'].indexOf(status) === -1 && !retryableCorrection) {
+      if (['PENDING', 'READY', 'RECOVERY_REQUIRED', ECHO_PHASE19_CORRECTION_REPROCESS_STATUS_].indexOf(status) === -1 && !retryableCorrection) {
         return;
       }
       if (candidateCount >= maxRows) return;
@@ -2166,7 +2167,7 @@ function processTurnInbox_(options) {
           processing_token: '',
           locked_at: '',
           transaction_id: result.transaction_id || row.transaction_id || '',
-          commit_event_id: result.event_id,
+          commit_event_id: result.commit_event_id || result.event_id,
           ui_feed_id: result.ui_feed_id || '',
           error_code: '',
           processed_at: new Date()
@@ -8798,6 +8799,8 @@ function commitSceneCorrectionCore_(event, options) {
       duplicate: true,
       transaction_id: started.transaction.transaction_id,
       event_id: originalEventId,
+      commit_event_id: event.event_id,
+      correction_event_id: event.event_id,
       ui_feed_id: started.transaction.ui_feed_id || ''
     };
   }
@@ -8857,6 +8860,8 @@ function commitSceneCorrectionCore_(event, options) {
       duplicate: false,
       transaction_id: transaction.transaction_id,
       event_id: originalEventId,
+      commit_event_id: event.event_id,
+      correction_event_id: event.event_id,
       ui_feed_id: result.feed_id,
       revision_id: result.revision_id,
       readback: correctionReadback,
